@@ -1,90 +1,182 @@
+Emmetteur : 
+
+
 #include <SPI.h>
 #include <nRF24L01.h>
 #include <RF24.h>
 
-// --- Configuration Matérielle  ---
 #define PIN_CE  7
 #define PIN_CSN 8
 
 RF24 radio(PIN_CE, PIN_CSN);
 
-// Adresse du canal de communication 
-const byte address[6] = "00001"; 
+const byte address[6] = "00001";
 
-// --- Variables Globales ---
-String monPseudo = "Expéditeur"; // Exemple de pseudo (EF13)
+String monPseudo = "Expediteur"; // EF5
 
 void setup() {
   Serial.begin(9600);
+
+  // Désactiver le buzzer (D10 = sortie à 0)
+  pinMode(10, OUTPUT);
+  digitalWrite(10, LOW);
   
-  // Initialisation du NRF24
   if (!radio.begin()) {
     Serial.println(F("Erreur: Radio non connectée !"));
     while (1);
   }
 
-  radio.openWritingPipe(address); // Ouvre le canal en écriture
-  radio.setPALevel(RF24_PA_LOW);  // Puissance basse pour les tests sur table
-  radio.stopListening();          // Important : se mettre en mode émission
-}
-
-void loop() {
-  // Simulation d'un envoi (normalement déclenché par FS1)
-  // Ici on envoie un message de test toutes les 5 secondes
-  String messageAEnvoyer = "Ceci est un message tres long pour tester la fragmentation du protocole FS2 car le NRF24 est limite a 32 octets.";
-  
-  FS2_EnvoyerMessage(messageAEnvoyer, monPseudo);
-  
-  delay(5000);
+  radio.openWritingPipe(address);
+  radio.setPALevel(RF24_PA_LOW);
+  radio.stopListening();
 }
 
 /**
- * FS2 : Fonction pour envoyer un message complet
- * Gère la fragmentation des données > 32 octets [cite: 67]
+ * FS2 : envoyer un message complet en plusieurs paquets de 32 octets max
  */
 void FS2_EnvoyerMessage(String message, String pseudo) {
-  
-  Serial.println(F("--- Début envoi FS2 ---"));
-  
-  // Etape 1 : Envoyer le Pseudo (EF5) 
-  // On crée un préfixe pour dire "Ceci est le pseudo"
+  Serial.println(F("--- Debut envoi FS2 ---"));
+
+  // 1) Envoyer le pseudo avec un header "FROM:"
   char headerPayload[32] = "";
   String header = "FROM:" + pseudo;
   header.toCharArray(headerPayload, 32);
-  
+
   radio.write(&headerPayload, sizeof(headerPayload));
-  delay(50); // Petit délai pour laisser le récepteur traiter
+  delay(50);
 
-  // Etape 2 : Envoyer le corps du message découpé (EF4) 
-  int messageLength = message.length();
-  int position = 0;
+  // 2) Envoyer le corps du message en tronçons de 32 octets
+ // On veut 31 caracteres de texte + '\0' = 32 octets max
+const int CHUNK_SIZE = 31;
 
-  while (position < messageLength) {
-    char chunkBuffer[32] = ""; // Tampon de 32 octets max 
-    
-    // On extrait un morceau de 32 caractères 
-    
-    String chunk = message.substring(position, min(position + 32, messageLength));
-    chunk.toCharArray(chunkBuffer, 32);
+int messageLength = message.length();
+int position = 0;
 
-    // Envoi radio
-    bool report = radio.write(&chunkBuffer, sizeof(chunkBuffer));
-    
-    if (report) {
-      Serial.print(F("Paquet envoyé : "));
-      Serial.println(chunkBuffer);
-    } else {
-      Serial.println(F("Echec envoi paquet !"));
-    }
+while (position < messageLength) {
+  char chunkBuffer[CHUNK_SIZE + 1] = ""; // 31 chars + '\0'
 
-    position += 32; // On avance au bloc suivant
-    delay(50);      // Délai pour stabilité
+  int endPos = min(position + CHUNK_SIZE, messageLength);
+  String chunk = message.substring(position, endPos);
+
+  // copie jusqu'à 31 caractères + '\0'
+  chunk.toCharArray(chunkBuffer, CHUNK_SIZE + 1);
+
+  bool report = radio.write(&chunkBuffer, sizeof(chunkBuffer)); // 32 octets envoyés
+  if (report) {
+    Serial.print(F("Paquet envoye : "));
+    Serial.println(chunkBuffer);
+  } else {
+    Serial.println(F("Echec envoi paquet !"));
   }
-  
-  // Etape 3 : Signaler la fin du message
-  
-  char endMarker[] = "END";
-  radio.write(&endMarker, sizeof(endMarker));
-  
-  Serial.println(F("--- Message complet envoyé ---"));
+
+  position += CHUNK_SIZE;  // ⚠️ on avance de 31, pas 32
+  delay(50);
 }
+
+
+  // 3) Signaler la fin du message
+  char endMarker[32] = "END";
+  radio.write(&endMarker, sizeof(endMarker));
+
+  Serial.println(F("--- Message complet envoye ---"));
+}
+
+void loop() {
+  String messageAEnvoyer =
+    "Ceci est un message tres long pour tester la fragmentation du protocole FS2 car le NRF24 est limite a 32 octets.";
+
+  FS2_EnvoyerMessage(messageAEnvoyer, monPseudo);
+  delay(5000);
+}
+
+
+
+
+
+
+Recepteur : 
+
+
+
+
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+#define PIN_CE  7
+#define PIN_CSN 8
+
+RF24 radio(PIN_CE, PIN_CSN);
+
+const byte address[6] = "00001";
+
+// Buffer de reconstruction
+String pseudoEmetteur = "";
+String messageRecu    = "";
+bool   pseudoRecu     = false;
+
+void setup() {
+  Serial.begin(9600);
+
+  // Buzzer sur D10 → éviter les bruits
+  pinMode(10, OUTPUT);
+  digitalWrite(10, LOW);
+
+  if (!radio.begin()) {
+    Serial.println(F("Erreur: Radio non connectee !"));
+    while (1);
+  }
+
+  radio.openReadingPipe(1, address);
+  radio.setPALevel(RF24_PA_LOW);
+  radio.startListening();
+
+  Serial.println(F("Recepteur FS2 pret, en ecoute..."));
+}
+
+void loop() {
+  if (radio.available()) {
+    char buffer[32] = "";
+    radio.read(&buffer, sizeof(buffer));
+    buffer[31] = '\0';
+
+    String paquet = String(buffer);
+
+    // 1) PSEUDO (HEADER)
+    if (paquet.startsWith("FROM:")) {
+      pseudoEmetteur = paquet.substring(5); // après "FROM:"
+      messageRecu = "";
+      pseudoRecu = true;
+
+      Serial.print(F("Pseudo recu : "));
+      Serial.println(pseudoEmetteur);
+    }
+    // 2) FIN DE MESSAGE
+    else if (paquet.startsWith("END")) {
+      Serial.println(F("=== MESSAGE COMPLET RECU ==="));
+      Serial.print(F("De : "));
+      Serial.println(pseudoEmetteur);
+      Serial.print(F("Texte : "));
+      Serial.println(messageRecu);
+      Serial.println(F("============================"));
+
+      // On peut reset si on veut
+      pseudoRecu = false;
+      pseudoEmetteur = "";
+      messageRecu = "";
+    }
+    // 3) MORCEAU DE MESSAGE (CHUNK)
+    else {
+      if (pseudoRecu) {
+        messageRecu += paquet;
+        Serial.print(F("Chunk recu : "));
+        Serial.println(paquet);
+      } else {
+        // paquet reçu sans pseudo avant
+        Serial.print(F("Chunk recu sans pseudo : "));
+        Serial.println(paquet);
+      }
+    }
+  }
+}
+
