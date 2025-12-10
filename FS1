@@ -3,15 +3,12 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
- 
-
 // ===================== PINS =====================
 
-// >> MET ICI LA BROCHE 'SW' DE TON ENCODEUR <<
-
-const int PIN_ENC_CLK = 3;
-const int PIN_ENC_DT  = 4;
-const int PIN_ENC_SW  = 2;   // <-- APPUI SUR L’ENCODEUR
+const int PIN_ENC_A   = 3;    // A / CLK
+const int PIN_ENC_B   = 4;    // B / DT
+const int PIN_ENC_SW  = 2;    // Clic encodeur
+const int PIN_SW3     = A6;   // Bouton SW3 (priorité)
 
 // ===================== OLED =====================
 
@@ -19,84 +16,117 @@ const int PIN_ENC_SW  = 2;   // <-- APPUI SUR L’ENCODEUR
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// ===================== CLAVIER AZERTY =============
+// ===================== CLAVIER (ASCII simple) =====================
+// 3 lignes de 10 touches : lettres + ponctuation simple
+// (pour le rapport : on couvre toutes les lettres de l'alphabet français,
+// les accents pouvant être remplacés par e, a, c, etc. pour limiter les bugs d'affichage)
 
 const char KEYBOARD[] =
+"AZERTYUIOP"      // 0..9
+"QSDFGHJKLM"      // 10..19
+"WXCVBN,.;!?";    // 20..29 (ponctuation ASCII)
 
-"AZERTYUIOP"
+// taille réelle
+const int KB_LEN = sizeof(KEYBOARD) - 1;
 
-"QSDFGHJKLM"
-
-"WXCVBN?!.,";
-
-const int KB_LEN = sizeof(KEYBOARD) - 1; 
-const int INDEX_SPACE = KB_LEN;
-const int INDEX_DEL   = KB_LEN + 1;
-const int INDEX_SEND  = KB_LEN + 2;
-const int TOTAL_KEYS  = KB_LEN + 3;
+// indices spéciaux
+const int INDEX_SPACE = KB_LEN;      // 30
+const int INDEX_DEL   = KB_LEN + 1;  // 31
+const int INDEX_SEND  = KB_LEN + 2;  // 32
+const int TOTAL_KEYS  = KB_LEN + 3;  // 33 touches au total
 
 // ===================== SAISIE =====================
 
-char saisie[32] = "";
-int saisieLen = 0;
+#define MAX_MESSAGE_LEN 120
+
+char saisie[MAX_MESSAGE_LEN + 1] = "";
+int  saisieLen = 0;
+
+// Priorité du message : 0, 1 ou 2
+int priorite = 0;
 
 // ===================== ENCODEUR =====================
 
-int lastCLK = HIGH;
-bool lastButton = HIGH;
-unsigned long lastTime = 0;
+int lastEncA       = HIGH;
+int lastEncSW      = HIGH;
+unsigned long lastStepTime   = 0;
+unsigned long lastButtonTime = 0;
 
-// Initialisation encodeur
-
+// init encodeur
 void encoderInit() {
-    pinMode(PIN_ENC_CLK, INPUT_PULLUP);
-    pinMode(PIN_ENC_DT,  INPUT_PULLUP);
-    pinMode(PIN_ENC_SW,  INPUT_PULLUP);
-    lastCLK = digitalRead(PIN_ENC_CLK);
+    pinMode(PIN_ENC_A,  INPUT_PULLUP);
+    pinMode(PIN_ENC_B,  INPUT_PULLUP);
+    pinMode(PIN_ENC_SW, INPUT_PULLUP);
+
+    pinMode(PIN_SW3, INPUT); // SW3 mesuré en analogique
+
+    lastEncA  = digitalRead(PIN_ENC_A);
+    lastEncSW = digitalRead(PIN_ENC_SW);
 }
 
- 
-
-// Lecture rotation
-
+// lecture rotation : −1 / 0 / +1
 int readEncoderStep() {
+    unsigned long now = millis();
+    if (now - lastStepTime < 3) return 0;   // petit filtre anti-rebond
+
     int step = 0;
-    int clk = digitalRead(PIN_ENC_CLK);
-    if (clk != lastCLK) {
-        if (digitalRead(PIN_ENC_DT) != clk)
-            step = 1;
-        else
-            step = -1;
-        lastCLK = clk;
+    int etatA = digitalRead(PIN_ENC_A);
+
+    if (etatA != lastEncA) {
+        // on ne compte que le front descendant
+        if (etatA == LOW) {
+            int etatB = digitalRead(PIN_ENC_B);
+            if (etatB == HIGH) step = +1;   // sens 1
+            else               step = -1;   // sens inverse
+        }
+        lastStepTime = now;
     }
+
+    lastEncA = etatA;
     return step;
 }
 
- 
-
-// Appui sur l’encodeur
-
+// clic sur l’encodeur
 bool readEncoderPush() {
     bool pressed = false;
     int state = digitalRead(PIN_ENC_SW);
     unsigned long now = millis();
-    if (state == LOW && lastButton == HIGH && (now - lastTime) > 200) {
-        pressed = true;
-        lastTime = now;
+
+    if (state != lastEncSW) {
+        if (now - lastButtonTime > 150) {  // anti-rebond
+            if (state == LOW && lastEncSW == HIGH) {
+                pressed = true;
+            }
+            lastButtonTime = now;
+        }
     }
-    lastButton = state;
+
+    lastEncSW = state;
     return pressed;
 }
 
-// ===================== SAISIE =====================
+// bouton SW3 → changement de priorité
+bool readSW3Push() {
+    static int lastVal = 1023;
+    int val = analogRead(PIN_SW3);  // ~1023 au repos, ~0 appuyé
+    bool pressed = false;
+
+    if (val < 300 && lastVal > 700) {
+        pressed = true;
+    }
+    lastVal = val;
+    return pressed;
+}
+
+// ===================== GESTION SAISIE =====================
 
 void addChar(char c) {
-    if (saisieLen < 31) {
+    if (saisieLen < MAX_MESSAGE_LEN) {
         saisie[saisieLen++] = c;
-        saisie[saisieLen] = '\0';
+        saisie[saisieLen]   = '\0';
     }
 }
- 
+
 void deleteChar() {
     if (saisieLen > 0) {
         saisieLen--;
@@ -106,11 +136,19 @@ void deleteChar() {
 
 void onSend() {
     display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
-    display.println("MESSAGE ENVOYE:");
+    display.println("MESSAGE ENVOYE");
+    display.print("Prio = ");
+    display.println(priorite);
+    display.println("");
     display.println(saisie);
     display.display();
+
     delay(1500);
+
+    // reset
     saisieLen = 0;
     saisie[0] = '\0';
 }
@@ -119,99 +157,132 @@ void onSend() {
 
 void drawUI(int cursor) {
     display.clearDisplay();
-    // Barre de saisie
-
-    display.drawRect(0, 0, 128, 16, SSD1306_WHITE);
-    display.setCursor(3, 4);
-    display.print(saisie);
     display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
 
-    // LIGNE 1
+    // ----- Barre de saisie (en haut) -----
+    display.drawRect(0, 0, 128, 16, SSD1306_WHITE);
 
+    // afficher la fin du message si trop long
+    int maxChars = 18;
+    int start = 0;
+    if (saisieLen > maxChars) start = saisieLen - maxChars;
+
+    display.setCursor(3, 4);
+    for (int i = start; i < saisieLen; i++) {
+        display.print(saisie[i]);
+    }
+
+    // priorité en haut à droite
+    display.setCursor(96, 4);
+    display.print("P=");
+    display.print(priorite);
+
+    // ----- LIGNE 1 (y = 18..27) -----
     for (int i = 0; i < 10; i++) {
         int x = i * 12;
         if (cursor == i)
             display.fillRect(x, 18, 12, 10, SSD1306_WHITE);
+
         display.setCursor(x + 3, 20);
         display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
         display.print(KEYBOARD[i]);
     }
 
-    // LIGNE 2
-
+    // ----- LIGNE 2 (y = 30..39) -----
     for (int i = 10; i < 20; i++) {
         int x = (i - 10) * 12;
         if (cursor == i)
             display.fillRect(x, 30, 12, 10, SSD1306_WHITE);
+
         display.setCursor(x + 3, 32);
         display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
         display.print(KEYBOARD[i]);
     }
 
-    // LIGNE 3
-
+    // ----- LIGNE 3 (y = 42..51) -----
     for (int i = 20; i < KB_LEN; i++) {
         int x = (i - 20) * 12;
         if (cursor == i)
             display.fillRect(x, 42, 12, 10, SSD1306_WHITE);
+
         display.setCursor(x + 3, 44);
         display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
         display.print(KEYBOARD[i]);
     }
 
-    // LIGNE 4 : SPACE / DEL / SEND
+    // remettre le texte en blanc pour les touches spéciales
+    display.setTextColor(SSD1306_WHITE);
+
+    // ----- LIGNE 4 : SPACE / DEL / SEND (remontée pour ne plus être coupée) -----
+
+    int yBas = 52;     // au lieu de 56
+    int hBas = 10;
 
     // SPACE
-
     if (cursor == INDEX_SPACE) {
-        display.fillRect(0, 56, 40, 10, SSD1306_WHITE);
-        display.setCursor(2, 58);
+        display.fillRect(0, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(2, yBas + 2);
         display.setTextColor(SSD1306_BLACK);
         display.print("SPACE");
     } else {
-        display.drawRect(0, 56, 40, 10, SSD1306_WHITE);
-        display.setCursor(2, 58);
+        display.drawRect(0, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(2, yBas + 2);
+        display.setTextColor(SSD1306_WHITE);
         display.print("SPACE");
     }
 
     // DEL
-
     if (cursor == INDEX_DEL) {
-        display.fillRect(45, 56, 30, 10, SSD1306_WHITE);
-        display.setCursor(48, 58);
+        display.fillRect(45, yBas, 30, hBas, SSD1306_WHITE);
+        display.setCursor(48, yBas + 2);
         display.setTextColor(SSD1306_BLACK);
         display.print("DEL");
     } else {
-        display.drawRect(45, 56, 30, 10, SSD1306_WHITE);
-        display.setCursor(48, 58);
+        display.drawRect(45, yBas, 30, hBas, SSD1306_WHITE);
+        display.setCursor(48, yBas + 2);
+        display.setTextColor(SSD1306_WHITE);
         display.print("DEL");
     }
 
     // SEND
-
     if (cursor == INDEX_SEND) {
-        display.fillRect(80, 56, 40, 10, SSD1306_WHITE);
-        display.setCursor(84, 58);
+        display.fillRect(80, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(84, yBas + 2);
         display.setTextColor(SSD1306_BLACK);
         display.print("SEND");
     } else {
-        display.drawRect(80, 56, 40, 10, SSD1306_WHITE);
-        display.setCursor(84, 58);
+        display.drawRect(80, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(84, yBas + 2);
+        display.setTextColor(SSD1306_WHITE);
         display.print("SEND");
     }
+
     display.display();
 }
 
 // ===================== PROGRAMME =====================
 
+int cursor = 0;
+
 void setup() {
     Serial.begin(115200);
     encoderInit();
+
     display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-    drawUI(0);
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("FS1 : Clavier BIPBIP");
+    display.display();
+    delay(700);
+
+    drawUI(cursor);
 }
-int cursor = 0;
+
 void loop() {
+    // 1) Rotation -> déplacement du curseur
     int step = readEncoderStep();
     if (step != 0) {
         cursor += step;
@@ -219,11 +290,24 @@ void loop() {
         if (cursor >= TOTAL_KEYS) cursor = 0;
         drawUI(cursor);
     }
+
+    // 2) Clic encodeur -> validation de la touche
     if (readEncoderPush()) {
-        if (cursor == INDEX_SPACE) addChar(' ');
-        else if (cursor == INDEX_DEL) deleteChar();
-        else if (cursor == INDEX_SEND) onSend();
-        else addChar(KEYBOARD[cursor]);
+        if (cursor == INDEX_SPACE) {
+            addChar(' ');
+        } else if (cursor == INDEX_DEL) {
+            deleteChar();
+        } else if (cursor == INDEX_SEND) {
+            onSend();
+        } else {
+            addChar(KEYBOARD[cursor]);
+        }
+        drawUI(cursor);
+    }
+
+    // 3) Bouton SW3 -> changement de priorité 0/1/2
+    if (readSW3Push()) {
+        priorite = (priorite + 1) % 3;   // 0 -> 1 -> 2 -> 0
         drawUI(cursor);
     }
 }
