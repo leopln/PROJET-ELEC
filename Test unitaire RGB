@@ -1,3 +1,38 @@
 #include <arduino.h>
+const int PIN_LED_R = 5;
+const int PIN_LED_G = 6;
+const int PIN_LED_B = 9;
+
+void setup() {
+  pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_LED_G, OUTPUT);
+  pinMode(PIN_LED_B, OUTPUT);
+}
+
+void loop() {
+  // Rouge seul
+  digitalWrite(PIN_LED_R, HIGH);
+  digitalWrite(PIN_LED_G, LOW);
+  digitalWrite(PIN_LED_B, LOW);
+  delay(1000);
+
+  // Vert seul
+  digitalWrite(PIN_LED_R, LOW);
+  digitalWrite(PIN_LED_G, HIGH);
+  digitalWrite(PIN_LED_B, LOW);
+  delay(1000);
+
+  // Bleu seul
+  digitalWrite(PIN_LED_R, LOW);
+  digitalWrite(PIN_LED_G, LOW);
+  digitalWrite(PIN_LED_B, HIGH);
+  delay(1000);
+
+  // Tout éteint
+  digitalWrite(PIN_LED_R, LOW);
+  digitalWrite(PIN_LED_G, LOW);
+  digitalWrite(PIN_LED_B, LOW);
+  delay(1000);
+}
 
 
