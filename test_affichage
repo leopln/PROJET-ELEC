@@ -1,0 +1,229 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+ 
+
+// ===================== PINS =====================
+
+// >> MET ICI LA BROCHE 'SW' DE TON ENCODEUR <<
+
+const int PIN_ENC_CLK = 3;
+const int PIN_ENC_DT  = 4;
+const int PIN_ENC_SW  = 2;   // <-- APPUI SUR L’ENCODEUR
+
+// ===================== OLED =====================
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ===================== CLAVIER AZERTY =============
+
+const char KEYBOARD[] =
+
+"AZERTYUIOP"
+
+"QSDFGHJKLM"
+
+"WXCVBN?!.,";
+
+const int KB_LEN = sizeof(KEYBOARD) - 1; 
+const int INDEX_SPACE = KB_LEN;
+const int INDEX_DEL   = KB_LEN + 1;
+const int INDEX_SEND  = KB_LEN + 2;
+const int TOTAL_KEYS  = KB_LEN + 3;
+
+// ===================== SAISIE =====================
+
+char saisie[32] = "";
+int saisieLen = 0;
+
+// ===================== ENCODEUR =====================
+
+int lastCLK = HIGH;
+bool lastButton = HIGH;
+unsigned long lastTime = 0;
+
+// Initialisation encodeur
+
+void encoderInit() {
+    pinMode(PIN_ENC_CLK, INPUT_PULLUP);
+    pinMode(PIN_ENC_DT,  INPUT_PULLUP);
+    pinMode(PIN_ENC_SW,  INPUT_PULLUP);
+    lastCLK = digitalRead(PIN_ENC_CLK);
+}
+
+ 
+
+// Lecture rotation
+
+int readEncoderStep() {
+    int step = 0;
+    int clk = digitalRead(PIN_ENC_CLK);
+    if (clk != lastCLK) {
+        if (digitalRead(PIN_ENC_DT) != clk)
+            step = 1;
+        else
+            step = -1;
+        lastCLK = clk;
+    }
+    return step;
+}
+
+ 
+
+// Appui sur l’encodeur
+
+bool readEncoderPush() {
+    bool pressed = false;
+    int state = digitalRead(PIN_ENC_SW);
+    unsigned long now = millis();
+    if (state == LOW && lastButton == HIGH && (now - lastTime) > 200) {
+        pressed = true;
+        lastTime = now;
+    }
+    lastButton = state;
+    return pressed;
+}
+
+// ===================== SAISIE =====================
+
+void addChar(char c) {
+    if (saisieLen < 31) {
+        saisie[saisieLen++] = c;
+        saisie[saisieLen] = '\0';
+    }
+}
+ 
+void deleteChar() {
+    if (saisieLen > 0) {
+        saisieLen--;
+        saisie[saisieLen] = '\0';
+    }
+}
+
+void onSend() {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("MESSAGE ENVOYE:");
+    display.println(saisie);
+    display.display();
+    delay(1500);
+    saisieLen = 0;
+    saisie[0] = '\0';
+}
+
+// ===================== AFFICHAGE =====================
+
+void drawUI(int cursor) {
+    display.clearDisplay();
+    // Barre de saisie
+
+    display.drawRect(0, 0, 128, 16, SSD1306_WHITE);
+    display.setCursor(3, 4);
+    display.print(saisie);
+    display.setTextSize(1);
+
+    // LIGNE 1
+
+    for (int i = 0; i < 10; i++) {
+        int x = i * 12;
+        if (cursor == i)
+            display.fillRect(x, 18, 12, 10, SSD1306_WHITE);
+        display.setCursor(x + 3, 20);
+        display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
+        display.print(KEYBOARD[i]);
+    }
+
+    // LIGNE 2
+
+    for (int i = 10; i < 20; i++) {
+        int x = (i - 10) * 12;
+        if (cursor == i)
+            display.fillRect(x, 30, 12, 10, SSD1306_WHITE);
+        display.setCursor(x + 3, 32);
+        display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
+        display.print(KEYBOARD[i]);
+    }
+
+    // LIGNE 3
+
+    for (int i = 20; i < KB_LEN; i++) {
+        int x = (i - 20) * 12;
+        if (cursor == i)
+            display.fillRect(x, 42, 12, 10, SSD1306_WHITE);
+        display.setCursor(x + 3, 44);
+        display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
+        display.print(KEYBOARD[i]);
+    }
+
+    // LIGNE 4 : SPACE / DEL / SEND
+
+    // SPACE
+
+    if (cursor == INDEX_SPACE) {
+        display.fillRect(0, 56, 40, 10, SSD1306_WHITE);
+        display.setCursor(2, 58);
+        display.setTextColor(SSD1306_BLACK);
+        display.print("SPACE");
+    } else {
+        display.drawRect(0, 56, 40, 10, SSD1306_WHITE);
+        display.setCursor(2, 58);
+        display.print("SPACE");
+    }
+
+    // DEL
+
+    if (cursor == INDEX_DEL) {
+        display.fillRect(45, 56, 30, 10, SSD1306_WHITE);
+        display.setCursor(48, 58);
+        display.setTextColor(SSD1306_BLACK);
+        display.print("DEL");
+    } else {
+        display.drawRect(45, 56, 30, 10, SSD1306_WHITE);
+        display.setCursor(48, 58);
+        display.print("DEL");
+    }
+
+    // SEND
+
+    if (cursor == INDEX_SEND) {
+        display.fillRect(80, 56, 40, 10, SSD1306_WHITE);
+        display.setCursor(84, 58);
+        display.setTextColor(SSD1306_BLACK);
+        display.print("SEND");
+    } else {
+        display.drawRect(80, 56, 40, 10, SSD1306_WHITE);
+        display.setCursor(84, 58);
+        display.print("SEND");
+    }
+    display.display();
+}
+
+// ===================== PROGRAMME =====================
+
+void setup() {
+    Serial.begin(115200);
+    encoderInit();
+    display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+    drawUI(0);
+}
+int cursor = 0;
+void loop() {
+    int step = readEncoderStep();
+    if (step != 0) {
+        cursor += step;
+        if (cursor < 0) cursor = TOTAL_KEYS - 1;
+        if (cursor >= TOTAL_KEYS) cursor = 0;
+        drawUI(cursor);
+    }
+    if (readEncoderPush()) {
+        if (cursor == INDEX_SPACE) addChar(' ');
+        else if (cursor == INDEX_DEL) deleteChar();
+        else if (cursor == INDEX_SEND) onSend();
+        else addChar(KEYBOARD[cursor]);
+        drawUI(cursor);
+    }
+}
