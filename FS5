@@ -1,0 +1,197 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <EEPROM.h>
+
+// --- Matériel ---
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
+#define PIN_CLK 3  // Encodeur A
+#define PIN_DT  4  // Encodeur B
+#define PIN_SW  2  // Encodeur Bouton
+#define PIN_BUZZER 10
+
+// --- Variables de Réglages ---
+int canal = 1;         // Canal Radio (1 à 100)
+int son = 1;           // Type de son (1 à 3)
+int pseudoIndex = 0;   // Numéro du pseudo choisi dans la liste
+
+// Liste des pseudos possibles (Simplification pour éviter l'éditeur de texte)
+const char* listePseudos[] = {"Editeur1", "Editeur2", "Editeur3", "Editeur4", "Editeur5"};
+
+// État du Menu (0 = Menu Principal, 1 = Réglage Canal, 2 = Réglage Pseudo, 3 = Réglage Son)
+int etatMenu = 0; 
+int curseur = 1;  // Position du curseur dans le menu
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Initialisation Écran
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  
+  // Initialisation Boutons
+  pinMode(PIN_CLK, INPUT_PULLUP);
+  pinMode(PIN_DT, INPUT_PULLUP);
+  pinMode(PIN_SW, INPUT_PULLUP);
+  pinMode(PIN_BUZZER, OUTPUT);
+
+  // --- Chargement Mémoire (EF15) ---
+  // On lit les valeurs sauvegardées. Si c'est 255 (mémoire vide), on met par défaut.
+  canal = EEPROM.read(0);
+  if (canal == 255) canal = 1;
+
+  pseudoIndex = EEPROM.read(1);
+  if (pseudoIndex == 255) pseudoIndex = 0; // Premier pseudo de la liste
+
+  son = EEPROM.read(2);
+  if (son == 255) son = 1;
+}
+
+void loop() {
+  // On gère l'affichage selon l'état du menu
+  if (etatMenu == 0) {
+    afficherMenuPrincipal();
+  } else if (etatMenu == 1) {
+    reglerCanal();
+  } else if (etatMenu == 2) {
+    reglerPseudo();
+  } else if (etatMenu == 3) {
+    reglerSon();
+  }
+}
+
+// ---------------------------------------------------------
+// FONCTIONS D'AFFICHAGE ET LOGIQUE
+// ---------------------------------------------------------
+
+void afficherMenuPrincipal() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("--- MENU REGLAGES ---"));
+  
+  // Affichage des options
+  if (curseur == 1) display.print(F("> ")); else display.print(F("  "));
+  display.println(F("Canal Radio"));
+  
+  if (curseur == 2) display.print(F("> ")); else display.print(F("  "));
+  display.println(F("Pseudo"));
+  
+  if (curseur == 3) display.print(F("> ")); else display.print(F("  "));
+  display.println(F("Sonnerie"));
+  
+  if (curseur == 4) display.print(F("> ")); else display.print(F("  "));
+  display.println(F("Quitter"));
+
+  display.display();
+
+  // Gestion Encodeur (Menu)
+  int action = lireEncodeur();
+  if (action == 1) { curseur++; if (curseur > 4) curseur = 1; }
+  if (action == -1) { curseur--; if (curseur < 1) curseur = 4; }
+  
+  // Validation (Clic)
+  if (action == 2) {
+    if (curseur == 1) etatMenu = 1; // Aller vers Canal
+    if (curseur == 2) etatMenu = 2; // Aller vers Pseudo
+    if (curseur == 3) etatMenu = 3; // Aller vers Son
+    if (curseur == 4) {
+      // Quitter le menu (Retour au programme principal)
+      display.clearDisplay();
+      display.setCursor(0,20);
+      display.print("Sauvegarde OK!");
+      display.display();
+      delay(1000);
+      // Ici vous mettrez votre code principal ou un break;
+    }
+  }
+}
+
+void reglerCanal() { // EF12
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("CHOIX CANAL (0-100)"));
+  display.setTextSize(2);
+  display.setCursor(50, 30);
+  display.print(canal);
+  display.setTextSize(1);
+  display.display();
+
+  int action = lireEncodeur();
+  if (action == 1 && canal < 100) canal++;
+  if (action == -1 && canal > 0) canal--;
+  
+  if (action == 2) { // Sauvegarder et Quitter
+    EEPROM.write(0, canal); // Sauvegarde à l'adresse 0
+    etatMenu = 0; // Retour au menu
+  }
+}
+
+void reglerPseudo() { // EF13
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("CHOIX PSEUDO"));
+  
+  // Affiche le pseudo actuel de la liste
+  display.setTextSize(2);
+  display.setCursor(20, 30);
+  display.print(listePseudos[pseudoIndex]);
+  display.setTextSize(1);
+  display.display();
+
+  int action = lireEncodeur();
+  // On change l'index pour parcourir la liste des pseudos
+  if (action == 1 && pseudoIndex < 4) pseudoIndex++;
+  if (action == -1 && pseudoIndex > 0) pseudoIndex--;
+  
+  if (action == 2) {
+    EEPROM.write(1, pseudoIndex); // Sauvegarde à l'adresse 1
+    etatMenu = 0;
+  }
+}
+
+void reglerSon() { // EF14
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("TYPE SONNERIE (1-3)"));
+  display.setTextSize(2);
+  display.setCursor(60, 30);
+  display.print(son);
+  display.setTextSize(1);
+  display.display();
+
+  int action = lireEncodeur();
+  if (action == 1 && son < 3) { son++; bipTest(); }
+  if (action == -1 && son > 1) { son--; bipTest(); }
+  
+  if (action == 2) {
+    EEPROM.write(2, son); // Sauvegarde à l'adresse 2
+    etatMenu = 0;
+  }
+}
+
+// Petit bip pour entendre le choix
+void bipTest() {
+  if (son == 1) { tone(PIN_BUZZER, 1000, 100); }
+  if (son == 2) { tone(PIN_BUZZER, 2000, 100); }
+  if (son == 3) { tone(PIN_BUZZER, 500, 100); }
+}
+
+// --- Fonction simple pour lire l'encodeur ---
+int lastClk = HIGH;
+int lireEncodeur() {
+  int resultat = 0;
+  int currentClk = digitalRead(PIN_CLK);
+
+  // Rotation
+  if (currentClk != lastClk && currentClk == LOW) {
+    if (digitalRead(PIN_DT) != currentClk) resultat = 1; // Droite
+    else resultat = -1; // Gauche
+  }
+  lastClk = currentClk;
+
+  // Clic (Bouton)
+  if (digitalRead(PIN_SW) == LOW) {
+    delay(200); // Anti-rebond (attend que le signal se stabilise)
+    resultat = 2; 
+  }
+  return resultat;
+}
