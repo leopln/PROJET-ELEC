@@ -1,0 +1,110 @@
+#include <Arduino.h>
+
+#define PIN_BUZZER 10  // Buzzer BZ1 (digital)
+#define PIN_LED_R  5   // LED Rouge (PWM)
+#define PIN_LED_G  6   // LED Verte (PWM)
+#define PIN_LED_B  9   // LED Bleue (PWM)
+#define PIN_BTN_STOP 2 // Bouton de l'encodeur (SW2) pour arrêter l'alerte
+
+// Définition des priorités (EF7)
+#define PRIO_HAUTE   1
+#define PRIO_MOYENNE 2
+#define PRIO_BASSE   3
+
+// Prototypes (utile si vous transformez en .cpp)
+void FS3_Alerter(int priorite);
+void setRGB(int r, int g, int b);
+
+void setup() {
+  Serial.begin(9600);
+
+  // Configuration des sorties
+  // IMPORTANT : la pin 10 peut être utilisée par SPI sur certains shields.
+  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_LED_G, OUTPUT);
+  pinMode(PIN_LED_B, OUTPUT);
+
+  // Entrée bouton avec pull-up interne
+  pinMode(PIN_BTN_STOP, INPUT_PULLUP);
+
+  // Etat initial
+  setRGB(0, 0, 0);
+  noTone(PIN_BUZZER);
+}
+
+void loop() {
+  // --- Simulation pour le test ---
+  // Imaginez que FS2 ou le NRF24 vient de recevoir un message
+  Serial.println("Simulation : Message recu - Priorite HAUTE");
+  FS3_Alerter(PRIO_HAUTE);
+  delay(5000);
+}
+
+/**
+ * FS3 : Alerter à la réception d'un message
+ * - EF6 : Signal sonore
+ * - EF7 : Signal lumineux selon priorité
+ * - EF8 : S'arrête sur action utilisateur
+ */
+void FS3_Alerter(int priorite) {
+  bool alerteActive = true;
+
+  // Définition de la couleur selon la priorité (EF7)
+  int valR = 0, valG = 0, valB = 0;
+  switch (priorite) {
+    case PRIO_HAUTE:   // ROUGE - Urgence
+      valR = 255; valG = 0;   valB = 0;
+      break;
+    case PRIO_MOYENNE: // ORANGE/JAUNE - Normal
+      valR = 255; valG = 100; valB = 0;
+      break;
+    case PRIO_BASSE:   // BLEU - Info
+      valR = 0;   valG = 0;   valB = 255;
+      break;
+    default:
+      valR = valG = valB = 0;
+  }
+
+  // Boucle d'alerte (EF8 : continue jusqu'à appui bouton)
+  while (alerteActive) {
+    // 1. Allumer LED et Son
+    setRGB(valR, valG, valB);
+    tone(PIN_BUZZER, 1000); // Bip à 1000 Hz
+
+    // On attend un peu en vérifiant le bouton souvent (pour être réactif)
+    for (int i = 0; i < 20; i++) {
+      delay(10);
+      if (digitalRead(PIN_BTN_STOP) == LOW) { // LOW = appuyé (pull-up)
+        alerteActive = false;
+        break;
+      }
+    }
+    if (!alerteActive) break;
+
+    // 2. Éteindre LED et Son (Effet clignotant)
+    setRGB(0, 0, 0);
+    noTone(PIN_BUZZER);
+
+    // On attend encore en vérifiant le bouton
+    for (int i = 0; i < 20; i++) {
+      delay(10);
+      if (digitalRead(PIN_BTN_STOP) == LOW) {
+        alerteActive = false;
+        break;
+      }
+    }
+  }
+
+  // Assurance que tout est éteint à la fin
+  setRGB(0, 0, 0);
+  noTone(PIN_BUZZER);
+  Serial.println("Alerte acquittee par l'utilisateur.");
+}
+
+// Fonction utilitaire pour piloter la LED RGB (attend des valeurs 0..255)
+void setRGB(int r, int g, int b) {
+  analogWrite(PIN_LED_R, r);
+  analogWrite(PIN_LED_G, g);
+  analogWrite(PIN_LED_B, b);
+}
