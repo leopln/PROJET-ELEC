@@ -1,0 +1,105 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Arduino.h>
+
+// --- Configuration Écran OLED ---
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1 
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// --- Configuration Encodeur (SW2) ---
+#define PIN_ENC_A 3
+#define PIN_ENC_B 4
+#define PIN_BTN   2
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Initialisation OLED
+  // Adresse 0x3C pour la plupart des écrans OLED 128x64
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    Serial.println(F("Echec init OLED"));
+    for(;;);
+  }
+  
+  // Initialisation Encodeur
+  pinMode(PIN_ENC_A, INPUT_PULLUP);
+  pinMode(PIN_ENC_B, INPUT_PULLUP);
+  pinMode(PIN_BTN, INPUT_PULLUP);
+
+  display.clearDisplay();
+  display.display();
+}
+
+void loop() {
+  // --- Simulation pour le test ---
+  String pseudoTest = "BipBoy";
+  String messageTest = "Salut! Ceci est un long message pour tester la fonction FS4. Il faut tourner la molette pour lire la suite du texte qui depasse de l'ecran. Fin du test.";
+  
+  // On appelle la fonction d'affichage
+  // Dans le programme final, ceci sera appelé après la réception (FS3)
+  FS4_MontrerMessage(pseudoTest, messageTest);
+  
+  // Attente avant de relancer la démo
+  delay(2000);
+}
+
+/**
+ * FS4 : Montrer un message reçu
+ * Affiche le pseudo en entête fixe (EF10)
+ * Permet de scroller le texte avec l'encodeur (EF11)
+ * Quitte l'affichage si on appuie sur le bouton
+ */
+void FS4_MontrerMessage(String pseudo, String message) {
+  
+  int scrollY = 0; // Position verticale du texte
+  int lastStateA = digitalRead(PIN_ENC_A);
+  bool lectureEnCours = true;
+
+  // Calcul de la hauteur totale du texte approximative
+  // (pour savoir quand arrêter de scroller vers le bas)
+  int hauteurTexte = (message.length() / 21) * 10 + 20; 
+
+  while (lectureEnCours) {
+    
+    // --- 1. Gestion de l'Encodeur (Scrolling) ---
+    int currentStateA = digitalRead(PIN_ENC_A);
+    
+    if (currentStateA != lastStateA && currentStateA == LOW) {
+      if (digitalRead(PIN_ENC_B) != currentStateA) {
+        scrollY -= 8; // Tourne à droite -> Descend (texte remonte)
+      } else {
+        scrollY += 8; // Tourne à gauche -> Monte
+      }
+    }
+    lastStateA = currentStateA;
+
+    // Limites du scrolling
+    if (scrollY > 0) scrollY = 0; // Ne pas aller trop haut
+    // Ne pas aller trop bas (formule simplifiée)
+    if (scrollY < -hauteurTexte + 40) scrollY = -hauteurTexte + 40; 
+
+    // --- 2. Gestion du Bouton (Quitter) ---
+    if (digitalRead(PIN_BTN) == LOW) {
+      lectureEnCours = false;
+      delay(300); // Anti-rebond
+    }
+
+    // --- 3. Affichage à l'écran ---
+    display.clearDisplay();
+
+    // A. Corps du message (Zone défilante)
+    // On l'affiche d'abord pour qu'il passe "sous" le bandeau titre
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 16 + scrollY); // 16px de marge pour le titre
+    display.print(message);
+
+    // B. Bandeau Titre (Fixe) - EF10
+    // On efface le haut de l'écran pour dessiner le titre par dessus le texte scrollé
+    display.fillRect(0, 0, 128, 16, SSD1306_BLACK); 
+    display.setCursor(0, 0);
+    display.print(F("DE: "));
+    display.println(pseudo);
+    display.drawLine(0, 15, 128, 15, SSD1306_WHITE);
