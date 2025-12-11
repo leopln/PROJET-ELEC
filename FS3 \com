@@ -1,0 +1,88 @@
+#include <Arduino.h>
+
+#define PIN_BUZZER 10
+#define PIN_LED_R  5
+#define PIN_LED_G  6
+#define PIN_LED_B  9
+#define PIN_BTN_STOP 2
+
+#define PRIO_HAUTE   1
+#define PRIO_MOYENNE 2
+#define PRIO_BASSE   3
+
+void FS3_Alerter(int priorite);
+void setRGB(int r, int g, int b);
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_LED_G, OUTPUT);
+  pinMode(PIN_LED_B, OUTPUT);
+
+  pinMode(PIN_BTN_STOP, INPUT_PULLUP);
+
+  setRGB(0, 0, 0);
+  noTone(PIN_BUZZER);
+}
+
+void loop() {
+  Serial.println("Simulation : Message recu - Priorite HAUTE");
+  FS3_Alerter(PRIO_HAUTE);
+  delay(5000);
+}
+
+void FS3_Alerter(int priorite) {
+  bool alerteActive = true;
+
+  int valR = 0, valG = 0, valB = 0;
+  switch (priorite) {
+    case PRIO_HAUTE:
+      valR = 255; valG = 0;    valB = 0;
+      break;
+    case PRIO_MOYENNE:
+      valR = 255; valG = 100; valB = 0;
+      break;
+    case PRIO_BASSE:
+      valR = 0;    valG = 0;    valB = 255;
+      break;
+    default:
+      valR = valG = valB = 0;
+  }
+
+  while (alerteActive) {
+    setRGB(valR, valG, valB);
+    tone(PIN_BUZZER, 1000);
+
+    for (int i = 0; i < 20; i++) {
+      delay(10);
+      if (digitalRead(PIN_BTN_STOP) == LOW) {
+        alerteActive = false;
+        break;
+      }
+    }
+    if (!alerteActive) break;
+
+    setRGB(0, 0, 0);
+    noTone(PIN_BUZZER);
+
+    for (int i = 0; i < 20; i++) {
+      delay(10);
+      if (digitalRead(PIN_BTN_STOP) == LOW) {
+        alerteActive = false;
+        break;
+      }
+    }
+  }
+
+  setRGB(0, 0, 0);
+  noTone(PIN_BUZZER);
+  Serial.println("Alerte acquittee par l'utilisateur.");
+}
+
+void setRGB(int r, int g, int b) {
+  analogWrite(PIN_LED_R, r);
+  analogWrite(PIN_LED_G, g);
+  analogWrite(PIN_LED_B, b);
+}
