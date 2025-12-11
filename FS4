@@ -1,6 +1,6 @@
+#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Arduino.h>
 
 // --- Configuration Écran OLED ---
 #define SCREEN_WIDTH 128
@@ -102,4 +102,12 @@ void FS4_MontrerMessage(String pseudo, String message) {
     display.setCursor(0, 0);
     display.print(F("DE: "));
     display.println(pseudo);
-    display.drawLine(0, 15, 128, 15, SSD1306_WHITE);
+    display.drawLine(0, 15, 128, 15, SSD1306_WHITE); // Ligne de séparation
+
+    display.display();
+  }
+  
+  // Nettoyage en sortant
+  display.clearDisplay();
+  display.display();
+}
