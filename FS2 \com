@@ -1,0 +1,156 @@
+Emetteur:
+
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+#define PIN_CE  7
+#define PIN_CSN 8
+
+RF24 radio(PIN_CE, PIN_CSN);
+
+const byte address[6] = "00001";
+
+String monPseudo = "Expediteur";
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(10, OUTPUT);
+  digitalWrite(10, LOW);
+  
+  if (!radio.begin()) {
+    Serial.println(F("Erreur: Radio non connectée !"));
+    while (1);
+  }
+
+  radio.openWritingPipe(address);
+  radio.setPALevel(RF24_PA_LOW);
+  radio.stopListening();
+}
+
+void FS2_EnvoyerMessage(String message, String pseudo) {
+  Serial.println(F("--- Debut envoi FS2 ---"));
+
+  char headerPayload[32] = "";
+  String header = "FROM:" + pseudo;
+  header.toCharArray(headerPayload, 32);
+
+  radio.write(&headerPayload, sizeof(headerPayload));
+  delay(50);
+
+  const int CHUNK_SIZE = 31;
+
+  int messageLength = message.length();
+  int position = 0;
+
+  while (position < messageLength) {
+    char chunkBuffer[CHUNK_SIZE + 1] = "";
+
+    int endPos = min(position + CHUNK_SIZE, messageLength);
+    String chunk = message.substring(position, endPos);
+
+    chunk.toCharArray(chunkBuffer, CHUNK_SIZE + 1);
+
+    bool report = radio.write(&chunkBuffer, sizeof(chunkBuffer));
+    if (report) {
+      Serial.print(F("Paquet envoye : "));
+      Serial.println(chunkBuffer);
+    } else {
+      Serial.println(F("Echec envoi paquet !"));
+    }
+
+    position += CHUNK_SIZE;
+    delay(50);
+  }
+
+  char endMarker[32] = "END";
+  radio.write(&endMarker, sizeof(endMarker));
+
+  Serial.println(F("--- Message complet envoye ---"));
+}
+
+void loop() {
+  String messageAEnvoyer =
+    "Ceci est un message tres long pour tester la fragmentation du protocole FS2 car le NRF24 est limite a 32 octets.";
+
+  FS2_EnvoyerMessage(messageAEnvoyer, monPseudo);
+  delay(5000);
+}
+
+
+Récepteur:
+
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+#define PIN_CE  7
+#define PIN_CSN 8
+
+RF24 radio(PIN_CE, PIN_CSN);
+
+const byte address[6] = "00001";
+
+String pseudoEmetteur = "";
+String messageRecu    = "";
+bool   pseudoRecu     = false;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(10, OUTPUT);
+  digitalWrite(10, LOW);
+
+  if (!radio.begin()) {
+    Serial.println(F("Erreur: Radio non connectee !"));
+    while (1);
+  }
+
+  radio.openReadingPipe(1, address);
+  radio.setPALevel(RF24_PA_LOW);
+  radio.startListening();
+
+  Serial.println(F("Recepteur FS2 pret, en ecoute..."));
+}
+
+void loop() {
+  if (radio.available()) {
+    char buffer[32] = "";
+    radio.read(&buffer, sizeof(buffer));
+    buffer[31] = '\0';
+
+    String paquet = String(buffer);
+
+    if (paquet.startsWith("FROM:")) {
+      pseudoEmetteur = paquet.substring(5);
+      messageRecu = "";
+      pseudoRecu = true;
+
+      Serial.print(F("Pseudo recu : "));
+      Serial.println(pseudoEmetteur);
+    }
+    else if (paquet.startsWith("END")) {
+      Serial.println(F("=== MESSAGE COMPLET RECU ==="));
+      Serial.print(F("De : "));
+      Serial.println(pseudoEmetteur);
+      Serial.print(F("Texte : "));
+      Serial.println(messageRecu);
+      Serial.println(F("============================"));
+
+      pseudoRecu = false;
+      pseudoEmetteur = "";
+      messageRecu = "";
+    }
+    else {
+      if (pseudoRecu) {
+        messageRecu += paquet;
+        Serial.print(F("Chunk recu : "));
+        Serial.println(paquet);
+      } else {
+        Serial.print(F("Chunk recu sans pseudo : "));
+        Serial.println(paquet);
+      }
+    }
+  }
+}
