@@ -1,0 +1,141 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+const int PIN_ENC_A  = 3; 
+const int PIN_ENC_B  = 4; 
+const int PIN_ENC_SW = 2; 
+
+int lastClk = HIGH;
+
+void encoderInit();
+int  readEncoderStep(); 
+void afficherMessageScroll(const String &pseudo, const String &message);
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println(F("FS4 – affichage + scroll (front descendant)"));
+
+  Wire.begin();
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("Echec init OLED"));
+    while (1) {}
+  }
+
+  encoderInit();
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(F("FS4 pret"));
+  display.display();
+  delay(800);
+}
+
+void loop() {
+  String pseudo  = "BipBoy";
+  String message =
+    "Salut ! Ceci est un long message pour tester FS4. "
+    "On defile avec l'encodeur pour lire tout le texte, "
+    "puis on quitte en appuyant sur le bouton.";
+
+  afficherMessageScroll(pseudo, message);
+
+  delay(1000);
+}
+
+void encoderInit() {
+  pinMode(PIN_ENC_A,  INPUT_PULLUP);
+  pinMode(PIN_ENC_B,  INPUT_PULLUP);
+  pinMode(PIN_ENC_SW, INPUT_PULLUP);
+  lastClk = digitalRead(PIN_ENC_A);
+}
+
+int readEncoderStep() {
+  int step = 0;
+  int clk  = digitalRead(PIN_ENC_A);
+
+  if (lastClk == HIGH && clk == LOW) {
+    int dt = digitalRead(PIN_ENC_B);
+
+    if (dt == HIGH) {
+      step = +1; 
+    } else {
+      step = -1; 
+    }
+
+    Serial.print(F("Step encodeur = "));
+    Serial.println(step);
+  }
+
+  lastClk = clk;
+  return step;
+}
+
+void afficherMessageScroll(const String &pseudo, const String &message) {
+  const int CHARS_PER_LINE = 21; 
+  const int LINES_VISIBLE  = 4; 
+
+  int len = message.length();
+  if (len == 0) return;
+
+  int totalLines = (len + CHARS_PER_LINE - 1) / CHARS_PER_LINE;
+  int firstLine  = 0; 
+
+  bool lectureEnCours = true;
+
+  Serial.println(F("Entree dans FS4"));
+
+  while (lectureEnCours) {
+
+    int step = readEncoderStep();
+    if (step > 0 && firstLine < totalLines - LINES_VISIBLE) {
+      firstLine++;
+      Serial.print(F("firstLine = "));
+      Serial.println(firstLine);
+    } else if (step < 0 && firstLine > 0) {
+      firstLine--;
+      Serial.print(F("firstLine = "));
+      Serial.println(firstLine);
+    }
+
+    if (digitalRead(PIN_ENC_SW) == LOW) {
+      Serial.println(F("Bouton encodeur -> sortie FS4"));
+      delay(200); 
+      lectureEnCours = false;
+    }
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(0, 0);
+    display.print(F("DE: "));
+    display.println(pseudo);
+    display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+
+    for (int i = 0; i < LINES_VISIBLE; i++) {
+      int lineIdx = firstLine + i;
+      if (lineIdx >= totalLines) break;
+
+      int start = lineIdx * CHARS_PER_LINE;
+      int end   = start + CHARS_PER_LINE;
+      if (end > len) end = len;
+
+      display.setCursor(0, 16 + i * 10); 
+      for (int j = start; j < end; j++) {
+        display.print(message[j]);
+      }
+    }
+
+    display.display();
+    delay(5); 
+  }
+}
