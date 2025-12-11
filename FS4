@@ -1,113 +1,176 @@
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// --- Configuration Écran OLED ---
+// ===================== OLED =====================
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET    -1 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// --- Configuration Encodeur (SW2) ---
-#define PIN_ENC_A 3
-#define PIN_ENC_B 4
-#define PIN_BTN   2
+// ===================== ENCODEUR SW2 =====================
+// D'après le tableau du PCB : A -> D3, B -> D4, SW -> D2
+const int PIN_ENC_A  = 3;   // A / CLK
+const int PIN_ENC_B  = 4;   // B / DT
+const int PIN_ENC_SW = 2;   // Bouton encodeur
 
+// État précédent de A (CLK)
+int lastClk = HIGH;
+
+// --------- Protos ----------
+void encoderInit();
+int  readEncoderStep();  // -1, 0 ou +1
+void afficherMessageScroll(const String &pseudo, const String &message);
+
+// ===================== SETUP =====================
 void setup() {
-  Serial.begin(9600);
-  
-  // Initialisation OLED
-  // Adresse 0x3C pour la plupart des écrans OLED 128x64
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
-    Serial.println(F("Echec init OLED"));
-    for(;;);
-  }
-  
-  // Initialisation Encodeur
-  pinMode(PIN_ENC_A, INPUT_PULLUP);
-  pinMode(PIN_ENC_B, INPUT_PULLUP);
-  pinMode(PIN_BTN, INPUT_PULLUP);
+  Serial.begin(115200);
+  Serial.println(F("FS4 – affichage + scroll (front descendant)"));
 
+  Wire.begin();
+
+  // Init OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("Echec init OLED"));
+    while (1) {}
+  }
+
+  // Init encodeur
+  encoderInit();
+
+  // Petit écran de départ
   display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(F("FS4 pret"));
   display.display();
+  delay(800);
 }
 
+// ===================== LOOP =====================
 void loop() {
-  // --- Simulation pour le test ---
-  String pseudoTest = "BipBoy";
-  String messageTest = "Salut! Ceci est un long message pour tester la fonction FS4. Il faut tourner la molette pour lire la suite du texte qui depasse de l'ecran. Fin du test.";
-  
-  // On appelle la fonction d'affichage
-  // Dans le programme final, ceci sera appelé après la réception (FS3)
-  FS4_MontrerMessage(pseudoTest, messageTest);
-  
-  // Attente avant de relancer la démo
-  delay(2000);
+  String pseudo  = "BipBoy";
+  String message =
+    "Salut ! Ceci est un long message pour tester FS4. "
+    "On defile avec l'encodeur pour lire tout le texte, "
+    "puis on quitte en appuyant sur le bouton.";
+
+  afficherMessageScroll(pseudo, message);
+
+  // Petite pause symbolique avant de relancer la demo
+  delay(1000);
+}
+
+// ======================================================
+//                GESTION ENCODEUR
+// ======================================================
+
+void encoderInit() {
+  pinMode(PIN_ENC_A,  INPUT_PULLUP);
+  pinMode(PIN_ENC_B,  INPUT_PULLUP);
+  pinMode(PIN_ENC_SW, INPUT_PULLUP);
+  lastClk = digitalRead(PIN_ENC_A);
 }
 
 /**
- * FS4 : Montrer un message reçu
- * Affiche le pseudo en entête fixe (EF10)
- * Permet de scroller le texte avec l'encodeur (EF11)
- * Quitte l'affichage si on appuie sur le bouton
+ * Lecture de l'encodeur avec déclenchement
+ * uniquement sur le front DESCENDANT de A (HIGH -> LOW).
+ *
+ * Retourne :
+ *   +1 : un cran dans un sens
+ *   -1 : un cran dans l'autre sens
+ *    0 : pas de cran détecté
  */
-void FS4_MontrerMessage(String pseudo, String message) {
-  
-  int scrollY = 0; // Position verticale du texte
-  int lastStateA = digitalRead(PIN_ENC_A);
+int readEncoderStep() {
+  int step = 0;
+  int clk  = digitalRead(PIN_ENC_A);
+
+  // On ne regarde QUE le front descendant : HIGH -> LOW
+  if (lastClk == HIGH && clk == LOW) {
+    int dt = digitalRead(PIN_ENC_B);
+
+    if (dt == HIGH) {
+      step = +1;          // sens horaire
+    } else {
+      step = -1;          // sens anti-horaire
+    }
+
+    // Debug
+    Serial.print(F("Step encodeur = "));
+    Serial.println(step);
+  }
+
+  lastClk = clk;
+  return step;
+}
+
+// ======================================================
+//             FS4 : AFFICHAGE + SCROLL
+// ======================================================
+
+void afficherMessageScroll(const String &pseudo, const String &message) {
+  const int CHARS_PER_LINE = 21;  // ≈ 21 caractères par ligne
+  const int LINES_VISIBLE  = 4;   // 4 lignes visibles
+
+  int len = message.length();
+  if (len == 0) return;
+
+  int totalLines = (len + CHARS_PER_LINE - 1) / CHARS_PER_LINE;
+  int firstLine  = 0; // première ligne affichée
+
   bool lectureEnCours = true;
 
-  // Calcul de la hauteur totale du texte approximative
-  // (pour savoir quand arrêter de scroller vers le bas)
-  int hauteurTexte = (message.length() / 21) * 10 + 20; 
+  Serial.println(F("Entree dans FS4"));
 
   while (lectureEnCours) {
-    
-    // --- 1. Gestion de l'Encodeur (Scrolling) ---
-    int currentStateA = digitalRead(PIN_ENC_A);
-    
-    if (currentStateA != lastStateA && currentStateA == LOW) {
-      if (digitalRead(PIN_ENC_B) != currentStateA) {
-        scrollY -= 8; // Tourne à droite -> Descend (texte remonte)
-      } else {
-        scrollY += 8; // Tourne à gauche -> Monte
-      }
+
+    // 1) ENCODEUR → modification de la ligne de départ
+    int step = readEncoderStep();
+    if (step > 0 && firstLine < totalLines - LINES_VISIBLE) {
+      firstLine++;
+      Serial.print(F("firstLine = "));
+      Serial.println(firstLine);
+    } else if (step < 0 && firstLine > 0) {
+      firstLine--;
+      Serial.print(F("firstLine = "));
+      Serial.println(firstLine);
     }
-    lastStateA = currentStateA;
 
-    // Limites du scrolling
-    if (scrollY > 0) scrollY = 0; // Ne pas aller trop haut
-    // Ne pas aller trop bas (formule simplifiée)
-    if (scrollY < -hauteurTexte + 40) scrollY = -hauteurTexte + 40; 
-
-    // --- 2. Gestion du Bouton (Quitter) ---
-    if (digitalRead(PIN_BTN) == LOW) {
+    // 2) BOUTON → quitter l’affichage
+    if (digitalRead(PIN_ENC_SW) == LOW) {
+      Serial.println(F("Bouton encodeur -> sortie FS4"));
+      delay(200);         // anti-rebond
       lectureEnCours = false;
-      delay(300); // Anti-rebond
     }
 
-    // --- 3. Affichage à l'écran ---
+    // 3) AFFICHAGE OLED
     display.clearDisplay();
-
-    // A. Corps du message (Zone défilante)
-    // On l'affiche d'abord pour qu'il passe "sous" le bandeau titre
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 16 + scrollY); // 16px de marge pour le titre
-    display.print(message);
 
-    // B. Bandeau Titre (Fixe) - EF10
-    // On efface le haut de l'écran pour dessiner le titre par dessus le texte scrollé
-    display.fillRect(0, 0, 128, 16, SSD1306_BLACK); 
+    // Bandeau haut : expéditeur (EF10)
     display.setCursor(0, 0);
     display.print(F("DE: "));
     display.println(pseudo);
-    display.drawLine(0, 15, 128, 15, SSD1306_WHITE); // Ligne de séparation
+    display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+
+    // Corps du message (4 lignes)
+    for (int i = 0; i < LINES_VISIBLE; i++) {
+      int lineIdx = firstLine + i;
+      if (lineIdx >= totalLines) break;
+
+      int start = lineIdx * CHARS_PER_LINE;
+      int end   = start + CHARS_PER_LINE;
+      if (end > len) end = len;
+
+      display.setCursor(0, 16 + i * 10); // y = 16, 26, 36, 46
+      for (int j = start; j < end; j++) {
+        display.print(message[j]);
+      }
+    }
 
     display.display();
+    delay(5);   // laisse respirer le micro
   }
-  
-  // Nettoyage en sortant
-  display.clearDisplay();
-  display.display();
 }
