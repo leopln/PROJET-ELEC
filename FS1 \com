@@ -1,0 +1,173 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+const int PIN_ENC_A   = 3;
+const int PIN_ENC_B   = 4;
+const int PIN_ENC_SW  = 2;
+const int PIN_SW3     = A6;
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+const char KEYBOARD[] =
+"AZERTYUIOP"
+"QSDFGHJKLM"
+"WXCVBN,.;!?";
+
+const int KB_LEN = sizeof(KEYBOARD) - 1;
+
+const int INDEX_SPACE = KB_LEN;
+const int INDEX_DEL   = KB_LEN + 1;
+const int INDEX_SEND  = KB_LEN + 2;
+const int TOTAL_KEYS  = KB_LEN + 3;
+
+#define MAX_MESSAGE_LEN 120
+
+char saisie[MAX_MESSAGE_LEN + 1] = "";
+int  saisieLen = 0;
+
+int priorite = 0;
+
+int lastEncA       = HIGH;
+int lastEncSW      = HIGH;
+unsigned long lastStepTime   = 0;
+unsigned long lastButtonTime = 0;
+
+void encoderInit() {
+    pinMode(PIN_ENC_A,  INPUT_PULLUP);
+    pinMode(PIN_ENC_B,  INPUT_PULLUP);
+    pinMode(PIN_ENC_SW, INPUT_PULLUP);
+
+    pinMode(PIN_SW3, INPUT);
+
+    lastEncA  = digitalRead(PIN_ENC_A);
+    lastEncSW = digitalRead(PIN_ENC_SW);
+}
+
+int readEncoderStep() {
+    unsigned long now = millis();
+    if (now - lastStepTime < 3) return 0;
+
+    int step = 0;
+    int etatA = digitalRead(PIN_ENC_A);
+
+    if (etatA != lastEncA) {
+        if (etatA == LOW) {
+            int etatB = digitalRead(PIN_ENC_B);
+            if (etatB == HIGH) step = +1;
+            else               step = -1;
+        }
+        lastStepTime = now;
+    }
+
+    lastEncA = etatA;
+    return step;
+}
+
+bool readEncoderPush() {
+    bool pressed = false;
+    int state = digitalRead(PIN_ENC_SW);
+    unsigned long now = millis();
+
+    if (state != lastEncSW) {
+        if (now - lastButtonTime > 150) {
+            if (state == LOW && lastEncSW == HIGH) {
+                pressed = true;
+            }
+            lastButtonTime = now;
+        }
+    }
+
+    lastEncSW = state;
+    return pressed;
+}
+
+bool readSW3Push() {
+    static int lastVal = 1023;
+    int val = analogRead(PIN_SW3);
+    bool pressed = false;
+
+    if (val < 300 && lastVal > 700) {
+        pressed = true;
+    }
+    lastVal = val;
+    return pressed;
+}
+
+void addChar(char c) {
+    if (saisieLen < MAX_MESSAGE_LEN) {
+        saisie[saisieLen++] = c;
+        saisie[saisieLen]   = '\0';
+    }
+}
+
+void deleteChar() {
+    if (saisieLen > 0) {
+        saisieLen--;
+        saisie[saisieLen] = '\0';
+    }
+}
+
+void onSend() {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("MESSAGE ENVOYE");
+    display.print("Prio = ");
+    display.println(priorite);
+    display.println("");
+    display.println(saisie);
+    display.display();
+
+    delay(1500);
+
+    saisieLen = 0;
+    saisie[0] = '\0';
+}
+
+void drawUI(int cursor) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.drawRect(0, 0, 128, 16, SSD1306_WHITE);
+
+    int maxChars = 18;
+    int start = 0;
+    if (saisieLen > maxChars) start = saisieLen - maxChars;
+
+    display.setCursor(3, 4);
+    for (int i = start; i < saisieLen; i++) {
+        display.print(saisie[i]);
+    }
+
+    display.setCursor(96, 4);
+    display.print("P=");
+    display.print(priorite);
+
+    for (int i = 0; i < 10; i++) {
+        int x = i * 12;
+        if (cursor == i)
+            display.fillRect(x, 18, 12, 10, SSD1306_WHITE);
+
+        display.setCursor(x + 3, 20);
+        display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
+        display.print(KEYBOARD[i]);
+    }
+
+    for (int i = 10; i < 20; i++) {
+        int x = (i - 10) * 12;
+        if (cursor == i)
+            display.fillRect(x, 30, 12, 10, SSD1306_WHITE);
+
+        display.setCursor(x + 3, 32);
+        display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
+        display.print(KEYBOARD[i]);
+    }
+
+    for (int i = 20; i < KB_LEN; i++) {
+        int x = (i - 20) *
