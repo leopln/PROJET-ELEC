@@ -3,10 +3,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-const int PIN_ENC_A   = 3;
-const int PIN_ENC_B   = 4;
-const int PIN_ENC_SW  = 2;
-const int PIN_SW3     = A6;
+const int PIN_ENC_A = 3;
+const int PIN_ENC_B = 4;
+const int PIN_ENC_SW = 2;
+const int PIN_SW3 = A6;
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -20,30 +20,30 @@ const char KEYBOARD[] =
 const int KB_LEN = sizeof(KEYBOARD) - 1;
 
 const int INDEX_SPACE = KB_LEN;
-const int INDEX_DEL   = KB_LEN + 1;
-const int INDEX_SEND  = KB_LEN + 2;
-const int TOTAL_KEYS  = KB_LEN + 3;
+const int INDEX_DEL = KB_LEN + 1;
+const int INDEX_SEND = KB_LEN + 2;
+const int TOTAL_KEYS = KB_LEN + 3;
 
 #define MAX_MESSAGE_LEN 120
 
 char saisie[MAX_MESSAGE_LEN + 1] = "";
-int  saisieLen = 0;
+int saisieLen = 0;
 
 int priorite = 0;
 
-int lastEncA       = HIGH;
-int lastEncSW      = HIGH;
-unsigned long lastStepTime   = 0;
+int lastEncA = HIGH;
+int lastEncSW = HIGH;
+unsigned long lastStepTime = 0;
 unsigned long lastButtonTime = 0;
 
 void encoderInit() {
-    pinMode(PIN_ENC_A,  INPUT_PULLUP);
-    pinMode(PIN_ENC_B,  INPUT_PULLUP);
+    pinMode(PIN_ENC_A, INPUT_PULLUP);
+    pinMode(PIN_ENC_B, INPUT_PULLUP);
     pinMode(PIN_ENC_SW, INPUT_PULLUP);
 
     pinMode(PIN_SW3, INPUT);
 
-    lastEncA  = digitalRead(PIN_ENC_A);
+    lastEncA = digitalRead(PIN_ENC_A);
     lastEncSW = digitalRead(PIN_ENC_SW);
 }
 
@@ -58,7 +58,7 @@ int readEncoderStep() {
         if (etatA == LOW) {
             int etatB = digitalRead(PIN_ENC_B);
             if (etatB == HIGH) step = +1;
-            else               step = -1;
+            else step = -1;
         }
         lastStepTime = now;
     }
@@ -100,7 +100,7 @@ bool readSW3Push() {
 void addChar(char c) {
     if (saisieLen < MAX_MESSAGE_LEN) {
         saisie[saisieLen++] = c;
-        saisie[saisieLen]   = '\0';
+        saisie[saisieLen] = '\0';
     }
 }
 
@@ -170,4 +170,101 @@ void drawUI(int cursor) {
     }
 
     for (int i = 20; i < KB_LEN; i++) {
-        int x = (i - 20) *
+        int x = (i - 20) * 12;
+        if (cursor == i)
+            display.fillRect(x, 42, 12, 10, SSD1306_WHITE);
+
+        display.setCursor(x + 3, 44);
+        display.setTextColor(cursor == i ? SSD1306_BLACK : SSD1306_WHITE);
+        display.print(KEYBOARD[i]);
+    }
+
+    display.setTextColor(SSD1306_WHITE);
+
+    int yBas = 52;
+    int hBas = 10;
+
+    if (cursor == INDEX_SPACE) {
+        display.fillRect(0, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(2, yBas + 2);
+        display.setTextColor(SSD1306_BLACK);
+        display.print("SPACE");
+    } else {
+        display.drawRect(0, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(2, yBas + 2);
+        display.setTextColor(SSD1306_WHITE);
+        display.print("SPACE");
+    }
+
+    if (cursor == INDEX_DEL) {
+        display.fillRect(45, yBas, 30, hBas, SSD1306_WHITE);
+        display.setCursor(48, yBas + 2);
+        display.setTextColor(SSD1306_BLACK);
+        display.print("DEL");
+    } else {
+        display.drawRect(45, yBas, 30, hBas, SSD1306_WHITE);
+        display.setCursor(48, yBas + 2);
+        display.setTextColor(SSD1306_WHITE);
+        display.print("DEL");
+    }
+
+    if (cursor == INDEX_SEND) {
+        display.fillRect(80, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(84, yBas + 2);
+        display.setTextColor(SSD1306_BLACK);
+        display.print("SEND");
+    } else {
+        display.drawRect(80, yBas, 40, hBas, SSD1306_WHITE);
+        display.setCursor(84, yBas + 2);
+        display.setTextColor(SSD1306_WHITE);
+        display.print("SEND");
+    }
+
+    display.display();
+}
+
+int cursor = 0;
+
+void setup() {
+    Serial.begin(115200);
+    encoderInit();
+
+    display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("FS1 : Clavier BIPBIP");
+    display.display();
+    delay(700);
+
+    drawUI(cursor);
+}
+
+void loop() {
+    int step = readEncoderStep();
+    if (step != 0) {
+        cursor += step;
+        if (cursor < 0) cursor = TOTAL_KEYS - 1;
+        if (cursor >= TOTAL_KEYS) cursor = 0;
+        drawUI(cursor);
+    }
+
+    if (readEncoderPush()) {
+        if (cursor == INDEX_SPACE) {
+            addChar(' ');
+        } else if (cursor == INDEX_DEL) {
+            deleteChar();
+        } else if (cursor == INDEX_SEND) {
+            onSend();
+        } else {
+            addChar(KEYBOARD[cursor]);
+        }
+        drawUI(cursor);
+    }
+
+    if (readSW3Push()) {
+        priorite = (priorite + 1) % 3;
+        drawUI(cursor);
+    }
+}
