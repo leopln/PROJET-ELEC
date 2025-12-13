@@ -1,0 +1,685 @@
+/*
+ * PROJET BIP BIP ECE - Code Unifié
+ * Version : 2.0 (Optimisée V-Cycle)
+ *
+ * CORRECTIONS MATERIELLES CRITIQUES :
+ * 1. Pin 10 (Buzzer) : Gérée manuellement pour ne pas planter le bus SPI du NRF24.
+ * 2. Pin A6 (SW3) : Lue via analogRead() car c'est une entrée purement analogique.
+ * 3. RAM : Pas de String, buffers fixes, pas de gros Serial.print.
+ */
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <EEPROM.h>
+#include <string.h>   // strlen, strncpy, strncat, memset
+
+// ==================== CONFIGURATION MATERIELLE ====================
+
+// OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ENCODEUR (SW2)
+const int PIN_ENC_A  = 3;   // Interrupt
+const int PIN_ENC_B  = 4;
+const int PIN_ENC_SW = 2;   // Bouton encodeur
+
+// BOUTON ANALOGIQUE (SW3)
+const int PIN_SW3 = A6; // Analog Only sur Nano
+
+// LED RGB
+const int PIN_LED_R = 5;
+const int PIN_LED_G = 6;
+const int PIN_LED_B = 9;
+
+// BUZZER & RADIO
+const int PIN_BUZZER = 10; //! ATTENTION CONFLIT SPI!
+const int PIN_CE     = 7;
+const int PIN_CSN    = 8;
+
+RF24 radio(PIN_CE, PIN_CSN);
+
+// Adresses Radio (Pipes)
+const uint64_t ADDR_NODE_A = 0xE8E8F0F0E1LL;
+const uint64_t ADDR_NODE_B = 0xE8E8F0F0E2LL;
+
+// ==================== PARAMÈTRES EEPROM ====================
+
+struct Config {
+  uint8_t signature;    // 0x42 si EEPROM initialisée
+  uint8_t channel;      // 1-100
+  uint8_t pseudoIdx;    // 0-2
+  uint8_t soundType;    // 1-3
+  uint8_t role;         // 0=NodeA, 1=NodeB
+};
+Config settings;
+
+// Pseudos possibles
+const char* PSEUDOS[] = { "Alpha", "Bravo", "Cobra" };
+const int   NB_PSEUDOS = sizeof(PSEUDOS) / sizeof(PSEUDOS[0]);
+
+// ==================== CLAVIER (FS1) ====================
+
+// Clavier : 3 lignes, avec un espace dans la chaîne
+const char KEYBOARD[] = "AZERTYUIOPQSDFGHJKLM WXCVBN,.;!?"; // 31 chars
+const int  KB_LEN     = sizeof(KEYBOARD) - 1;
+
+// indices spéciaux : DEL et SEND
+// (on utilise KB_LEN = 31 comme dernière touche "normale",
+// puis 31 => DEL, 32 => SEND)
+#define MAX_MSG_LEN 100 // EF1 : au moins 100 caractères
+
+char txBuffer[MAX_MSG_LEN + 1];
+char rxBuffer[MAX_MSG_LEN + 1];
+uint8_t txLen      = 0;
+uint8_t txPriority = 0; // 0=Low, 1=Med, 2=High
+
+// Réception
+bool    hasNewMessage = false;
+uint8_t rxPriority    = 0;
+uint8_t rxSenderIdx   = 0;
+
+// ==================== ETATS DU SYSTEME ====================
+
+enum State {
+  ST_HOME,
+  ST_COMPOSE,
+  ST_READ,
+  ST_SETTINGS,
+  ST_ALERT
+};
+State currentState = ST_HOME;
+
+// ==================== ENCODEUR & BOUTONS ====================
+
+volatile int encoderPos     = 0;
+int         lastEncoderPos  = 0;
+bool        encBtnPressed   = false;
+bool        sw3BtnPressed   = false;
+unsigned long lastDebounce  = 0;
+
+// ==================== PROTOTYPES ====================
+
+// Radio
+void radioInit();
+void sendLongMessage();
+void checkRadio();
+
+// Affichage / Etats
+void loopHome();
+void loopCompose();
+void loopRead();
+void loopSettings();
+void loopAlert();
+void readButtons();
+
+// Settings
+void loadSettings();
+
+// Hardware utils
+void setLed(uint8_t r, uint8_t g, uint8_t b);
+void playTone(int freq, int duration);
+
+// ISR encodeur
+void isrEncoder();
+
+// ==================== PACKETS RADIO (FS2, fragmentation) ====================
+
+struct Packet {
+  uint8_t type;      // 'M' pour message
+  uint8_t pId;       // ID du paquet (compteur)
+  uint8_t total;     // Nombre total de fragments
+  uint8_t seq;       // Numéro du fragment actuel
+  uint8_t priority;  // Priorité du message
+  uint8_t sender;    // Index du pseudo envoyeur
+  char    payload[26];  // Données utiles (32 - 6 header = 26)
+};
+
+// ==================== SETUP ====================
+
+void setup() {
+  // IMPORTANT : pin 10 en OUTPUT pour respecter le mode SPI Master
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+
+  // Serial optionnel pour debug
+  Serial.begin(9600);
+
+  // Charger la config depuis EEPROM
+  loadSettings();
+
+  // OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    while (1) {}  // bloque si pas d'écran
+  }
+  display.setTextColor(SSD1306_WHITE);
+  display.cp437(true);
+
+  // Encodeur et switch
+  pinMode(PIN_ENC_A, INPUT_PULLUP);
+  pinMode(PIN_ENC_B, INPUT_PULLUP);
+  pinMode(PIN_ENC_SW, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), isrEncoder, FALLING);
+
+  // LED RGB
+  pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_LED_G, OUTPUT);
+  pinMode(PIN_LED_B, OUTPUT);
+  setLed(0, 0, 0);
+
+  // Radio
+  radioInit();
+
+  // Splash screen
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(10, 20);
+  display.print(F("BIP BIP"));
+  display.setTextSize(1);
+  display.setCursor(30, 45);
+  display.print(settings.role == 0 ? F("NODE A") : F("NODE B"));
+  display.display();
+  delay(1500);
+
+  // Init message TX
+  txLen = 0;
+  txBuffer[0] = '\0';
+}
+
+// ==================== LOOP ====================
+
+void loop() {
+  // 1. Ecoute radio en permanence (EF9)
+  checkRadio();
+
+  // 2. Boutons / encodeur
+  readButtons();
+
+  // 3. Machine à états
+  switch (currentState) {
+    case ST_HOME:     loopHome();     break;
+    case ST_COMPOSE:  loopCompose();  break;
+    case ST_READ:     loopRead();     break;
+    case ST_SETTINGS: loopSettings(); break;
+    case ST_ALERT:    loopAlert();    break;
+  }
+}
+
+// ==================== RADIO ====================
+
+void radioInit() {
+  if (!radio.begin()) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print(F("Radio HS!"));
+    display.display();
+    while (1) {}
+  }
+
+  radio.setPALevel(RF24_PA_LOW);
+  radio.setDataRate(RF24_250KBPS);
+  radio.setAutoAck(false);
+  radio.setRetries(0, 0);
+
+  // Canal (1..100) -> 0..125
+  uint8_t ch = (settings.channel >= 1 && settings.channel <= 100)
+               ? (settings.channel - 1)
+               : 76; // default
+  radio.setChannel(ch);
+
+  radio.enableDynamicPayloads();
+
+  if (settings.role == 0) {   // Node A
+    radio.openWritingPipe(ADDR_NODE_B);
+    radio.openReadingPipe(1, ADDR_NODE_A);
+  } else {                    // Node B
+    radio.openWritingPipe(ADDR_NODE_A);
+    radio.openReadingPipe(1, ADDR_NODE_B);
+  }
+
+  radio.startListening();
+}
+
+void sendLongMessage() {
+  radio.stopListening();
+
+  int totalLen = strlen(txBuffer);
+  if (totalLen > MAX_MSG_LEN) {
+    totalLen = MAX_MSG_LEN;
+    txBuffer[MAX_MSG_LEN] = '\0';
+  }
+
+  const int chunkSize = 26;
+  int fragments = (totalLen + chunkSize - 1) / chunkSize;
+  if (fragments <= 0) fragments = 1;
+
+  Packet pkt;
+  pkt.type     = 'M';
+  pkt.pId      = (uint8_t)(millis() & 0xFF);
+  pkt.total    = (uint8_t)fragments;
+  pkt.priority = txPriority;
+  pkt.sender   = settings.pseudoIdx;
+
+  bool ok = true;
+
+  display.clearDisplay();
+  display.setCursor(0, 20);
+  display.print(F("Envoi..."));
+  display.display();
+
+  for (int i = 0; i < fragments; i++) {
+    pkt.seq = (uint8_t)i;
+
+    int start = i * chunkSize;
+    int len   = totalLen - start;
+    if (len > chunkSize) len = chunkSize;
+
+    memset(pkt.payload, 0, sizeof(pkt.payload));
+    strncpy(pkt.payload, txBuffer + start, len);
+
+    if (!radio.write(&pkt, sizeof(pkt))) {
+      ok = false;
+    }
+    delay(15);
+  }
+
+  radio.startListening();
+
+  display.clearDisplay();
+  display.setCursor(0, 20);
+  if (ok) display.print(F("Message envoye!"));
+  else    display.print(F("Echec envoi"));
+  display.display();
+  delay(1000);
+
+  // reset message
+  txLen = 0;
+  txBuffer[0] = '\0';
+  currentState = ST_HOME;
+}
+
+void checkRadio() {
+  if (currentState == ST_ALERT) return;
+
+  while (radio.available()) {
+    Packet pkt;
+    radio.read(&pkt, sizeof(pkt));
+
+    if (pkt.type == 'M') {
+      if (pkt.seq == 0) {
+        memset(rxBuffer, 0, MAX_MSG_LEN + 1);
+        rxPriority  = pkt.priority;
+        rxSenderIdx = pkt.sender;
+      }
+
+      // concat payload
+      strncat(rxBuffer, pkt.payload, sizeof(pkt.payload));
+
+      if (pkt.seq == pkt.total - 1) {
+        // Fin du message
+        hasNewMessage = true;
+        currentState  = ST_ALERT;  // FS3 : alerte à la réception
+      }
+    }
+  }
+}
+
+// ==================== ETAT HOME ====================
+
+void loopHome() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print(F("== BIP ECE =="));
+
+  static int menuIdx = 0;
+  const char* items[3] = { "Composer", "Dernier Msg", "Reglages" };
+
+  if (encoderPos > lastEncoderPos) {
+    menuIdx++;
+    lastEncoderPos = encoderPos;
+  }
+  if (encoderPos < lastEncoderPos) {
+    menuIdx--;
+    lastEncoderPos = encoderPos;
+  }
+  if (menuIdx < 0) menuIdx = 2;
+  if (menuIdx > 2) menuIdx = 0;
+
+  for (int i = 0; i < 3; i++) {
+    display.setCursor(10, 20 + (i * 15));
+    if (i == menuIdx) display.print(F("> "));
+    display.print(items[i]);
+  }
+
+  if (encBtnPressed) {
+    encBtnPressed = false;
+    if (menuIdx == 0) {
+      txLen       = 0;
+      txBuffer[0] = '\0';
+      currentState = ST_COMPOSE;
+      encoderPos    = 0;
+      lastEncoderPos = 0;
+    } else if (menuIdx == 1) {
+      currentState = ST_READ;
+    } else if (menuIdx == 2) {
+      currentState = ST_SETTINGS;
+    }
+  }
+
+  display.display();
+}
+
+// ==================== ETAT COMPOSE (FS1) ====================
+
+void loopCompose() {
+  static int cursorIdx = 0;
+
+  if (encoderPos > lastEncoderPos) {
+    cursorIdx++;
+    lastEncoderPos = encoderPos;
+  }
+  if (encoderPos < lastEncoderPos) {
+    cursorIdx--;
+    lastEncoderPos = encoderPos;
+  }
+
+  int maxCursor = KB_LEN + 2; // touches clavier + DEL + SEND
+  if (cursorIdx < 0)          cursorIdx = maxCursor;
+  if (cursorIdx > maxCursor)  cursorIdx = 0;
+
+  display.clearDisplay();
+
+  // Zone de texte
+  display.drawRect(0, 0, 128, 15, SSD1306_WHITE);
+  display.setCursor(2, 4);
+
+  int startDisp = 0;
+  if (txLen > 18) startDisp = txLen - 18;
+  display.print(txBuffer + startDisp);
+
+  // Priorité
+  display.setCursor(90, 0);
+  if (txPriority == 0)      display.print(F("P:Lo"));
+  else if (txPriority == 1) display.print(F("P:Me"));
+  else                      display.print(F("P:Hi"));
+
+  // Clavier
+  int x = 0;
+  int y = 20;
+  for (int i = 0; i < KB_LEN; i++) {
+    if (i == 10 || i == 20) {
+      x = 0;
+      y += 12;
+    }
+    if (i == cursorIdx) {
+      display.fillRect(x, y, 10, 10, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(x + 2, y + 1);
+    display.print(KEYBOARD[i]);
+    x += 12;
+  }
+
+  display.setTextColor(SSD1306_WHITE);
+
+  // DEL
+  int yBtn = 54;
+  if (cursorIdx == KB_LEN) {
+    display.fillRect(0, yBtn, 30, 10, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+  }
+  display.setCursor(2, yBtn + 1);
+  display.print(F("DEL"));
+
+  // SEND
+  if (cursorIdx == KB_LEN + 1) {
+    display.fillRect(40, yBtn, 30, 10, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+  }
+  display.setCursor(42, yBtn + 1);
+  display.print(F("ENV"));
+
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
+
+  // Clic encodeur
+  if (encBtnPressed) {
+    encBtnPressed = false;
+
+    if (cursorIdx < KB_LEN) {
+      if (txLen < MAX_MSG_LEN) {
+        txBuffer[txLen++] = KEYBOARD[cursorIdx];
+        txBuffer[txLen]   = '\0';
+      }
+    } else if (cursorIdx == KB_LEN) {
+      // DEL
+      if (txLen > 0) {
+        txLen--;
+        txBuffer[txLen] = '\0';
+      }
+    } else if (cursorIdx == KB_LEN + 1) {
+      // SEND
+      sendLongMessage();
+    }
+  }
+
+  // SW3 : priorité
+  if (sw3BtnPressed) {
+    sw3BtnPressed = false;
+    txPriority = (txPriority + 1) % 3;
+  }
+}
+
+// ==================== ETAT ALERT (FS3) ====================
+
+void loopAlert() {
+  static unsigned long lastToggle = 0;
+  static bool stateOn = false;
+
+  if (millis() - lastToggle > 200) {
+    lastToggle = millis();
+    stateOn = !stateOn;
+
+    if (stateOn) {
+      if (rxPriority == 2)      setLed(255, 0, 0);
+      else if (rxPriority == 1) setLed(255, 165, 0);
+      else                      setLed(0, 0, 255);
+
+      int freq = 1000;
+      if (settings.soundType == 2) freq = 2000;
+      if (settings.soundType == 3) freq = 500;
+      playTone(freq, 100);
+    } else {
+      setLed(0, 0, 0);
+    }
+  }
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(10, 20);
+  display.print(F("MESSAGE!"));
+  display.setTextSize(1);
+  display.setCursor(10, 50);
+  display.print(F("Click to read"));
+  display.display();
+
+  if (encBtnPressed || sw3BtnPressed) {
+    encBtnPressed  = false;
+    sw3BtnPressed  = false;
+    setLed(0, 0, 0);
+    currentState = ST_READ;
+  }
+}
+
+// ==================== ETAT READ (FS4) ====================
+
+void loopRead() {
+  static int scrollLine = 0;
+
+  if (encoderPos > lastEncoderPos) {
+    scrollLine++;
+    lastEncoderPos = encoderPos;
+  }
+  if (encoderPos < lastEncoderPos) {
+    scrollLine--;
+    lastEncoderPos = encoderPos;
+  }
+  if (scrollLine < 0) scrollLine = 0;
+
+  display.clearDisplay();
+
+  // Header
+  display.setCursor(0, 0);
+  display.print(F("De: "));
+  if (rxSenderIdx < NB_PSEUDOS) display.print(PSEUDOS[rxSenderIdx]);
+  else                          display.print(F("Inconnu"));
+  display.setCursor(90, 0);
+  display.print(F("P:"));
+  display.print(rxPriority);
+  display.drawLine(0, 9, 128, 9, SSD1306_WHITE);
+
+  // Corps du message (scrollé)
+  int yPos = 12 - (scrollLine * 8);
+  display.setCursor(0, yPos);
+  display.print(rxBuffer);
+
+  // Footer
+  display.setCursor(0, 55);
+  display.print(F("Click pour retour"));
+  display.display();
+
+  if (encBtnPressed || sw3BtnPressed) {
+    encBtnPressed = false;
+    sw3BtnPressed = false;
+    currentState  = ST_HOME;
+  }
+}
+
+// ==================== ETAT SETTINGS (FS5) ====================
+
+void loopSettings() {
+  static int setIdx = 0; // 0: channel, 1:pseudo, 2:sound, 3:role, 4:exit
+
+  if (encoderPos > lastEncoderPos) {
+    setIdx++;
+    lastEncoderPos = encoderPos;
+  }
+  if (encoderPos < lastEncoderPos) {
+    setIdx--;
+    lastEncoderPos = encoderPos;
+  }
+  if (setIdx > 4) setIdx = 0;
+  if (setIdx < 0) setIdx = 4;
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print(F("REGLAGES"));
+
+  display.setCursor(0, 15);
+  if (setIdx == 0) display.print(F("> "));
+  display.print(F("Canal: "));
+  display.print(settings.channel);
+
+  display.setCursor(0, 25);
+  if (setIdx == 1) display.print(F("> "));
+  display.print(F("Nom: "));
+  display.print(PSEUDOS[settings.pseudoIdx]);
+
+  display.setCursor(0, 35);
+  if (setIdx == 2) display.print(F("> "));
+  display.print(F("Son: "));
+  display.print(settings.soundType);
+
+  display.setCursor(0, 45);
+  if (setIdx == 3) display.print(F("> "));
+  display.print(F("Role: "));
+  display.print(settings.role == 0 ? F("Node A") : F("Node B"));
+
+  display.setCursor(0, 55);
+  if (setIdx == 4) display.print(F("> "));
+  display.print(F("Quitter & Sauver"));
+
+  display.display();
+
+  if (encBtnPressed) {
+    encBtnPressed = false;
+    if (setIdx == 0) {
+      settings.channel++;
+      if (settings.channel > 100) settings.channel = 1;
+    } else if (setIdx == 1) {
+      settings.pseudoIdx = (settings.pseudoIdx + 1) % NB_PSEUDOS;
+    } else if (setIdx == 2) {
+      settings.soundType++;
+      if (settings.soundType > 3) settings.soundType = 1;
+      playTone(1000, 100);
+    } else if (setIdx == 3) {
+      settings.role = !settings.role;
+    } else if (setIdx == 4) {
+      EEPROM.put(0, settings);
+      radioInit();     // appliquer canal + role
+      currentState = ST_HOME;
+    }
+  }
+}
+
+// ==================== UTILITAIRES ====================
+
+void isrEncoder() {
+  int b = digitalRead(PIN_ENC_B);
+  if (b == HIGH) encoderPos++;
+  else           encoderPos--;
+}
+
+void readButtons() {
+  // Bouton encodeur
+  if (digitalRead(PIN_ENC_SW) == LOW) {
+    if (millis() - lastDebounce > 250) {
+      encBtnPressed = true;
+      lastDebounce = millis();
+    }
+  }
+
+  // Bouton SW3 analogique
+  int a6Val = analogRead(PIN_SW3);
+  if (a6Val < 200) {
+    if (millis() - lastDebounce > 250) {
+      sw3BtnPressed = true;
+      lastDebounce  = millis();
+    }
+  }
+}
+
+void loadSettings() {
+  EEPROM.get(0, settings);
+  if (settings.signature != 0x42) {
+    settings.signature = 0x42;
+    settings.channel   = 76;
+    settings.pseudoIdx = 0;
+    settings.soundType = 1;
+    settings.role      = 0;  // Node A
+    EEPROM.put(0, settings);
+  }
+}
+
+void setLed(uint8_t r, uint8_t g, uint8_t b) {
+  analogWrite(PIN_LED_R, r);
+  analogWrite(PIN_LED_G, g);
+  analogWrite(PIN_LED_B, b);
+}
+
+void playTone(int freq, int duration) {
+  tone(PIN_BUZZER, freq, duration);
+}
