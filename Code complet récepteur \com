@@ -1,0 +1,430 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <EEPROM.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+const int PIN_ENC_A = 3;
+const int PIN_ENC_B = 4;
+const int PIN_ENC_SW = 2;
+const int PIN_SW3 = A6;
+
+const int PIN_LED_R = 5;
+const int PIN_LED_G = 6;
+const int PIN_LED_B = 9;
+const int PIN_BUZZER = 10;
+
+const int PIN_CE = 7;
+const int PIN_CSN = 8;
+
+RF24 radio(PIN_CE, PIN_CSN);
+const byte RF_ADDRESS[6] = "00001";
+
+struct Settings {
+  uint8_t marker;
+  uint8_t channel;
+  uint8_t sound;
+};
+
+Settings settings;
+
+#define RX_MAX_MESSAGE_LEN 120
+
+String pseudoEmetteur = "";
+String messageRecu = "";
+bool pseudoRecu = false;
+bool messagePret = false;
+uint8_t prioriteRecue = 0;
+
+int lastEncA = HIGH;
+int lastEncSW = HIGH;
+unsigned long lastStepTime = 0;
+unsigned long lastButtonTime = 0;
+int lastSW3Val = 1023;
+
+void encoderInit();
+int readEncoderStep();
+bool readEncoderPush();
+bool readSW3Push();
+
+void loadSettings();
+void runSettingsWizard();
+void radioInit();
+void handleRadio();
+
+void setRGB(uint8_t r, uint8_t g, uint8_t b);
+void FS3_Alerter(uint8_t priorite);
+void FS4_MontrerMessage(const String &pseudo, const String &message);
+
+void encoderInit() {
+  pinMode(PIN_ENC_A, INPUT_PULLUP);
+  pinMode(PIN_ENC_B, INPUT_PULLUP);
+  pinMode(PIN_ENC_SW, INPUT_PULLUP);
+  lastEncA = digitalRead(PIN_ENC_A);
+  lastEncSW = digitalRead(PIN_ENC_SW);
+}
+
+int readEncoderStep() {
+  const unsigned long debounceMs = 3;
+  unsigned long now = millis();
+  if (now - lastStepTime < debounceMs) return 0;
+
+  int step = 0;
+  int a = digitalRead(PIN_ENC_A);
+  if (a != lastEncA) {
+    if (a == LOW) {
+      int b = digitalRead(PIN_ENC_B);
+      if (b == HIGH) step = +1;
+      else step = -1;
+      lastStepTime = now;
+    }
+  }
+  lastEncA = a;
+  return step;
+}
+
+bool readEncoderPush() {
+  bool pressed = false;
+  int state = digitalRead(PIN_ENC_SW);
+  unsigned long now = millis();
+  const unsigned long debounceMs = 150;
+
+  if (state != lastEncSW) {
+    if (now - lastButtonTime > debounceMs) {
+      if (state == LOW && lastEncSW == HIGH) {
+        pressed = true;
+      }
+      lastButtonTime = now;
+    }
+  }
+  lastEncSW = state;
+  return pressed;
+}
+
+bool readSW3Push() {
+  bool pressed = false;
+  int val = analogRead(PIN_SW3);
+  if (val < 300 && lastSW3Val > 700) {
+    pressed = true;
+  }
+  lastSW3Val = val;
+  return pressed;
+}
+
+void loadSettings() {
+  EEPROM.get(0, settings);
+  if (settings.marker != 0x43) {
+    settings.marker = 0x43;
+    settings.channel = 76;
+    settings.sound = 1;
+    EEPROM.put(0, settings);
+  }
+}
+
+void runSettingsWizard() {
+  bool done = false;
+  while (!done) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println(F("Reglage canal radio"));
+    display.setCursor(0, 16);
+    display.print(F("Canal : "));
+    display.println(settings.channel);
+    display.setCursor(0, 32);
+    display.println(F("Tourne = changer"));
+    display.setCursor(0, 42);
+    display.println(F("Clic = valider"));
+    display.display();
+
+    int step = readEncoderStep();
+    if (step != 0) {
+      int ch = (int)settings.channel + step;
+      if (ch < 1) ch = 1;
+      if (ch > 100) ch = 100;
+      settings.channel = (uint8_t)ch;
+    }
+
+    if (readEncoderPush()) {
+      done = true;
+      delay(200);
+    }
+  }
+
+  done = false;
+  while (!done) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("Reglage sonnerie"));
+    display.setCursor(0, 16);
+    display.print(F("Son : "));
+    display.println(settings.sound);
+    display.setCursor(0, 32);
+    display.println(F("1..3"));
+    display.setCursor(0, 42);
+    display.println(F("Tourne = changer"));
+    display.setCursor(0, 52);
+    display.println(F("Clic = valider"));
+    display.display();
+
+    int step = readEncoderStep();
+    if (step != 0) {
+      int s = (int)settings.sound + step;
+      if (s < 1) s = 1;
+      if (s > 3) s = 3;
+      settings.sound = (uint8_t)s;
+
+      int freq = 1000;
+      if (settings.sound == 2) freq = 2000;
+      if (settings.sound == 3) freq = 600;
+      tone(PIN_BUZZER, freq, 120);
+    }
+
+    if (readEncoderPush()) {
+      done = true;
+      delay(200);
+    }
+  }
+
+  settings.marker = 0x43;
+  EEPROM.put(0, settings);
+
+  display.clearDisplay();
+  display.setCursor(0, 20);
+  display.println(F("Reglages sauvegardes"));
+  display.display();
+  delay(700);
+}
+
+void radioInit() {
+  if (!radio.begin()) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("Erreur NRF24"));
+    display.display();
+    while (1) {}
+  }
+
+  radio.setPALevel(RF24_PA_LOW);
+  radio.setDataRate(RF24_250KBPS);
+
+  uint8_t ch = 0;
+  if (settings.channel >= 1 && settings.channel <= 100) {
+    ch = settings.channel - 1;
+  }
+  radio.setChannel(ch);
+
+  radio.openReadingPipe(1, RF_ADDRESS);
+  radio.startListening();
+}
+
+void handleRadio() {
+  if (!radio.available()) return;
+
+  char buffer[32] = "";
+  radio.read(&buffer, sizeof(buffer));
+  buffer[31] = '\0';
+
+  String paquet(buffer);
+
+  if (paquet.startsWith("FROM:")) {
+    int sep = paquet.indexOf('|');
+    if (sep == -1) {
+      pseudoEmetteur = paquet.substring(5);
+      prioriteRecue = 0;
+    } else {
+      pseudoEmetteur = paquet.substring(5, sep);
+      int pIndex = paquet.indexOf('P', sep);
+      if (pIndex != -1 && pIndex + 1 < paquet.length()) {
+        char c = paquet.charAt(pIndex + 1);
+        if (c >= '0' && c <= '9') prioriteRecue = (uint8_t)(c - '0');
+        else prioriteRecue = 0;
+      } else {
+        prioriteRecue = 0;
+      }
+    }
+    messageRecu = "";
+    pseudoRecu = true;
+  }
+  else if (paquet.startsWith("END")) {
+    if (pseudoRecu) {
+      messagePret = true;
+    }
+  }
+  else {
+    if (pseudoRecu) {
+      messageRecu += paquet;
+      if ((int)messageRecu.length() > RX_MAX_MESSAGE_LEN) {
+        messageRecu = messageRecu.substring(0, RX_MAX_MESSAGE_LEN);
+      }
+    }
+  }
+}
+
+void setRGB(uint8_t r, uint8_t g, uint8_t b) {
+  analogWrite(PIN_LED_R, r);
+  analogWrite(PIN_LED_G, g);
+  analogWrite(PIN_LED_B, b);
+}
+
+void FS3_Alerter(uint8_t priorite) {
+  bool alerteActive = true;
+
+  while (alerteActive) {
+    uint8_t r = 0, g = 0, b = 0;
+    if (priorite == 2) {
+      r = 255; g = 0; b = 0;
+    } else if (priorite == 1) {
+      r = 50; g = 200; b = 0;
+    } else {
+      r = 0; g = 0; b = 255;
+    }
+    setRGB(r, g, b);
+
+    int freq = 1000;
+    if (settings.sound == 2) freq = 2000;
+    if (settings.sound == 3) freq = 600;
+    tone(PIN_BUZZER, freq);
+
+    for (int i = 0; i < 20; i++) {
+      delay(10);
+      if (digitalRead(PIN_ENC_SW) == LOW || readSW3Push()) {
+        alerteActive = false;
+        break;
+      }
+    }
+    if (!alerteActive) break;
+
+    setRGB(0, 0, 0);
+    noTone(PIN_BUZZER);
+
+    for (int i = 0; i < 20; i++) {
+      delay(10);
+      if (digitalRead(PIN_ENC_SW) == LOW || readSW3Push()) {
+        alerteActive = false;
+        break;
+      }
+    }
+  }
+
+  setRGB(0, 0, 0);
+  noTone(PIN_BUZZER);
+}
+
+void FS4_MontrerMessage(const String &pseudo, const String &message) {
+  const int CHARS_PER_LINE = 16;
+  const int LINES_VISIBLE = 4;
+
+  int len = message.length();
+  if (len == 0) return;
+
+  int totalLines = (len + CHARS_PER_LINE - 1) / CHARS_PER_LINE;
+  int firstLine = 0;
+  bool reading = true;
+
+  while (reading) {
+    int step = readEncoderStep();
+    if (step > 0 && firstLine < totalLines - LINES_VISIBLE) firstLine++;
+    if (step < 0 && firstLine > 0) firstLine--;
+
+    if (readEncoderPush() || readSW3Push()) {
+      reading = false;
+      break;
+    }
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(0, 0);
+    display.print(F("DE: "));
+    display.print(pseudo);
+    display.setCursor(90, 0);
+    display.print(F("P="));
+    display.print(prioriteRecue);
+    display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+
+    for (int i = 0; i < LINES_VISIBLE; i++) {
+      int lineIdx = firstLine + i;
+      if (lineIdx >= totalLines) break;
+
+      int start = lineIdx * CHARS_PER_LINE;
+      int end = start + CHARS_PER_LINE;
+      if (end > len) end = len;
+
+      display.setCursor(0, 16 + i * 10);
+      for (int j = start; j < end; j++) {
+        display.print(message[j]);
+      }
+    }
+
+    display.display();
+    delay(10);
+  }
+}
+
+void setup() {
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+
+  pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_LED_G, OUTPUT);
+  pinMode(PIN_LED_B, OUTPUT);
+  setRGB(0, 0, 0);
+
+  encoderInit();
+
+  Wire.begin();
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    while (1) {}
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(F("BIPBIP Reception"));
+  display.display();
+  delay(700);
+
+  loadSettings();
+
+  bool wantSettings = (digitalRead(PIN_ENC_SW) == LOW) || (analogRead(PIN_SW3) < 300);
+  if (wantSettings) {
+    runSettingsWizard();
+  }
+
+  radioInit();
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("En attente msg..."));
+  display.display();
+}
+
+void loop() {
+  handleRadio();
+
+  if (messagePret) {
+    FS3_Alerter(prioriteRecue);
+
+    FS4_MontrerMessage(pseudoEmetteur, messageRecu);
+
+    messagePret = false;
+    pseudoRecu = false;
+    messageRecu = "";
+    pseudoEmetteur = "";
+
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println(F("En attente msg..."));
+    display.display();
+  }
+}
